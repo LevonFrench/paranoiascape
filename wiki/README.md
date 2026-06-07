@@ -39,6 +39,8 @@ Welcome to the Paranoiascape reverse engineering and recompilation knowledge bas
     *   2026-05-30: Three bugs fixed/identified: (1) FBO reallocation bug (glTexImage2D→glTexSubImage2D) **FIXED**. (2) Wrong 24-bit flag for MOVTEST.STR removed — game uses 8-bit CLUT compositing, expects 15-bit RGB555 **FIXED**. (3) MDEC DMA timing mismatch — game sprite uploads overwrite FMV at x≥640 before rendering. Deferred upload (`fmv_refresh_vram`) added to FlushPrimitives **WORKING**.
 *   [Title Screen Snapshot Timing Bug](./title-screen-snapshot-bug.md)
     *   2026-05-30: **PRIMARY BLOCKER.** After FMV ends, title screen renders BLACK despite valid content in VRAM FBO. Root cause: `display_snapshot_` capture in FlushPrimitives is misaligned with the game's multi-FillRect rendering pattern. FillRect clears the FBO after snapshot capture, and subsequent FillRects don't trigger new snapshots. VRAM dumps confirm 8-bit CLUT quads + 3D geometry ARE rendered. CLUT quantizer (15-bit→8-bit) implemented but disabled pending this fix.
+*   [Recompiler Stack Pointer Leak & VBlank Pump Deadlock Fix](./recompiler-stack-leak-and-vblank-pump-fix.md)
+    *   2026-06-06: Resolved title screen stack corruption (R3000A to C early return leaks) and gameplay loading deadlock (60Hz VBlank interrupt simulation during spin loops).
 
 ## PSXRecomp General Rules (from AGENTS.md)
 1. **Ghidra is Ground Truth**: Always verify disassembly before guessing behavior.
