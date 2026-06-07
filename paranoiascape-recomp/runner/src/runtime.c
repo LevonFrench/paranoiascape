@@ -1227,6 +1227,22 @@ static uint16_t read_half(uint32_t addr) {
                  * The game loops on (STAT & 2) == 0 waiting for RX. */
                 val = 0x0287;
             }
+            else if (phys == 0x1F801040u) {
+                uint16_t pad = ~g_pad1_state;
+                extern int debug_server_get_input_override(void);
+                int override = debug_server_get_input_override();
+                if (override != -1) {
+                    pad = ~(uint16_t)override;
+                }
+
+                if (s_sio_state == 0) val = 0xFF;
+                else if (s_sio_state == 1) val = 0xFF;
+                else if (s_sio_state == 2) val = 0x41;
+                else if (s_sio_state == 3) val = 0x5A;
+                else if (s_sio_state == 4) val = (uint8_t)(pad & 0xFF);
+                else if (s_sio_state == 5) val = (uint8_t)((pad >> 8) & 0xFF);
+                else val = 0xFF;
+            }
         }
         /* Half-word reads of MMIO registers (lower 16 bits) */
         else if (phys == 0x1F801070u) val = g_i_stat & 0xFFFF;
@@ -5650,8 +5666,11 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             }
 
             /* Compute edge triggers (active low) */
-            uint16_t pressed = ~pad & s_last_pad;
-            uint16_t released = pad & ~s_last_pad;
+            uint16_t pressed = ~(~pad & s_last_pad);
+            if (override != -1 && override != 0) {
+                pressed = ~(uint16_t)override;
+            }
+            uint16_t released = ~(pad & ~s_last_pad);
             s_last_pad = pad;
 
             /* Write to pad buffer and edge triggers */

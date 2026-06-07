@@ -28,8 +28,34 @@ uint16_t pressed = ~(~pad & s_last_pad); /* Active LOW! */
 ```
 For an override like START (`0x0008`), `pad` becomes `0xFFF7` and `pressed` becomes `0xFFF7`.
 
+## SIO Halfword Access Bug & Title Screen Gating
+
+During the boot FMV and Title Screen sequence, the game state machine does not query `0x8008D60C`. Instead, it uses a low-level SIO polling routine (`func_8008D330`) which queries the Joypad RX register (`0x1F801040`) using **halfword read instructions** (`LH`/`LHU`).
+
+In our recompiler's runtime memory map, `read_byte` was previously the only place mocking SIO register reads from `0x1F801040`. Consequently, `read_half(0x1F801040)` would return `0x0000` (representing disconnected hardware). The Title Screen menu loop would thus believe no controller was connected and completely ignore inputs.
+
+We solved this by adding SIO data mocking into `read_half` inside `runner/src/runtime.c`:
+```c
+else if (phys == 0x1F801040u) {
+    uint16_t pad = ~g_pad1_state;
+    extern int debug_server_get_input_override(void);
+    int override = debug_server_get_input_override();
+    if (override != -1) {
+        pad = ~(uint16_t)override;
+    }
+
+    if (s_sio_state == 0) val = 0xFF;
+    else if (s_sio_state == 1) val = 0xFF;
+    else if (s_sio_state == 2) val = 0x41;
+    else if (s_sio_state == 3) val = 0x5A;
+    else if (s_sio_state == 4) val = (uint8_t)(pad & 0xFF);
+    else if (s_sio_state == 5) val = (uint8_t)((pad >> 8) & 0xFF);
+    else val = 0xFF;
+}
+```
+
 ## Automation Sequence
-With the recompiler pad injection properly configured as Active LOW, `play_game.py` can correctly drive the transition from the Title Screen into gameplay.
+With the recompiler pad injection properly configured as Active LOW and SIO reads fully mocked in both `read_byte` and `read_half`, the automation script `play_game.py` correctly drives the transition from the Title Screen into Stage 1 gameplay.
 
 The correct Japanese region button sequence is:
 1. `START` (Proceed past title)
@@ -38,4 +64,4 @@ The correct Japanese region button sequence is:
 4. `CIRCLE` ("Options" / Confirm)
 5. `CROSS` (Back/Cancel)
 
-Using `play_game.py` with `0x0008` (START) via the debug server now properly mimics this behavior without being wiped by the native code.
+Using `play_game.py` with the debug server input overrides now correctly bypasses all menus and loads the stage assets successfully.
