@@ -1,0 +1,45 @@
+# Build artifacts
+build/
+debug/
+artifacts
+
+# Editor / OS
+.vs/
+.vscode/
+*.user
+CMakeSettings.json
+Thumbs.db
+.DS_Store
+__pycache__/
+
+# Debug screenshots / captures
+*.png
+*.bmp
+
+# External tools / deps
+FFmpeg/
+
+# Crash telemetry
+.sentry-native/
+
+# Generated Recompiler Code
+generated/
+recompiler/--extra-funcs
+
+# Game Assets & ISOs
+iso/
+isos/
+extracted_iso/
+*.bin
+*.cue
+*.iso
+*.wav
+*.str
+*.da
+vram_dump.bin
+runner/vram_dump.bin
+
+# Logs and Debug Output
+*.log
+log.txt
+

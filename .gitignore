@@ -1,0 +1,106 @@
+# Compiled binaries & libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+
+# Build & Output directories
+build/
+*/build/
+out/
+bin/
+debug/
+
+# Generated Recompiler Code
+generated/
+*/generated/
+
+# Game Assets, ISOs & Ripped Files
+iso/
+isos/
+toukoniso/
+extracted/
+extracted_iso/
+*/extracted_iso/
+*/isos/
+*.bin
+*.cue
+*.iso
+*.wav
+*.str
+*.da
+*.hex
+vram_dump.bin
+*vram_dump.bin
+manual.html
+
+# Emulators & Third-Party Code
+pcsx-redux/
+PsyCross/
+psyz/
+toukonold/
+decompg/
+tools/
+*/tools/
+gits/
+
+# Ghidra Projects & Artifacts
+ghidra_*/
+ghidraRun.bat.lnk
+ghidraexport/
+scratch_ghidramcp/
+FUN_*
+
+# Logs, Debug Outputs & Temp Files
+*.log
+*log.txt
+boot_*.txt
+stdout*.txt
+stderr*.txt
+pid.txt
+auto_start.txt
+gdb_cmds.txt
+skip_fmv.txt
+console_out.txt
+*.png
+sshots/
+*/sshots/
+--extra-funcs
+disc.cfg
+pad_cmd.txt
+help.txt
+__pycache__/
+scratch/
+.sentry-native/
+
+# IDE & Tooling Caches
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+.DS_Store
+.claude/
+.git_bak/
+*.git_bak/
+
+
+# Scratch & Automations (Not Core Code)
+automate_emu.py
+dump_*.py
+find_state.py
+inject_input.py
+pcsx.lua
+pcsx_cmd.py
+recomp_cmd.py
+test_*.py
+
+# Local Launch Scripts
+run_recomp.bat
+run_emulator.bat
+test_recomp.bat

@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(StubRunner CXX C)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_C_STANDARD 17)
+
+add_executable(stub_recomp
+    src/launcher.cpp
+    src/stub_runner.cpp
+    src/crc32.c
+    src/extras.cpp
+)
+
+target_include_directories(stub_recomp PRIVATE include)
+if(WIN32)
+    target_link_libraries(stub_recomp PRIVATE opengl32 winmm ws2_32 comdlg32)
+endif()
