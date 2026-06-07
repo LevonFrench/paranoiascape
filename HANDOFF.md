@@ -1,30 +1,32 @@
 # Paranoiascape Session Handoff
 
-## Date: 2026-06-06 (Fix Recompiler Stack Pointer Leak)
+## Date: 2026-06-06 (VBlank Deadlock Resolution & Unified Clean Git Repo)
 
 ## Current Status
 
 ### What Works
 - **MIPS-to-C Stack Pointer Leak Fix**:
-  - Identified a systemic stack pointer (`cpu->sp`) leak in the recompiler's generated early returns (jump table `default` fallback branches and unrecognized indirect jumps).
-  - Modified the Stage 1 recompiler (`PSXRecomp.exe`) to restore the stack pointer (`cpu->sp = cpu->sp + func.stack_frame_size`) prior to these early return statements.
-  - Rebuilt the recompiler and regenerated `SLPS_013.75_full.c` and `SLPS_013.75_dispatch.c`.
-  - Static analysis confirmed all 131 jump-table stack leaks were successfully patched. The only early returns left are split-function mid-func jumps, which correctly inherit the stack frame and thus should not restore the stack frame at the jump site.
-- **Stage 2 Runner Rebuild**:
-  - Rebuilt the Stage 2 runner (`recomp.exe`) using Ninja.
-- **Runtime Verification**:
-  - Ran the game up to frame ~3000.
-  - The infinite loop console warning spam `non supported code: a1=0x00000000 a2=0x801EE560 ra=0x8007441C` has been completely eliminated.
-  - Verified from automated screenshots (e.g. `auto_f1400.png` and `auto_f2000.png`) that the title screen rendering functions correctly.
-  - The stack pointer remains stable throughout runtime, and the eyeball 3D models render correctly without clobbering RAM.
+  - Modified the Stage 1 recompiler (`PSXRecomp.exe`) to restore the stack pointer (`cpu->sp = cpu->sp + func.stack_frame_size`) prior to switch-case fallback and unrecognized indirect return branches.
+  - Regenerated code and rebuilt the runner. The stack pointer remains stable, eyeball 3D models render correctly, and warning spam is eliminated.
+- **60Hz VBlank Interrupt Deadlock Fix**:
+  - Game hung at frame ~1516 inside loop `func_800130D4` because `gp + 436` remained `0`, bypassing VSync and disabling VBlank callback processing.
+  - Implemented a 60Hz VBlank interrupt pump in [runtime.c](file:///j:/projects/paranoia/paranoiascape-recomp/runner/src/runtime.c) at address `0x80055F44u` to execute `func_80051434(cpu)` while preserving register states.
+  - Validation runs verify the deadlock is successfully broken: display resolution drops to `320x240` gameplay mode and VSync frames continue incrementing.
+- **SIO Pad Overrides**:
+  - Intercepted SIO commands in `runtime.c` to read socket input values from `play_game.py` natively.
+- **Unified Clean Repository**:
+  - Created strict [.gitignore](file:///j:/projects/paranoia/.gitignore) and [paranoiascape-recomp/.gitignore](file:///j:/projects/paranoia/paranoiascape-recomp/.gitignore) files.
+  - Renamed nested `.git` to `.git_bak` to unify tracking.
+  - Initialized clean repository on branch `main` at remote origin `https://github.com/LevonFrench/paranoiascape.git` containing only custom-written code and documentation.
+- **Documentation**:
+  - Detailed findings in [wiki/recompiler-stack-leak-and-vblank-pump-fix.md](file:///j:/projects/paranoia/wiki/recompiler-stack-leak-and-vblank-pump-fix.md).
 
 ---
 
-## Next Steps (Priority Order)
+## Next Steps
 
-1. **Verify gameplay input and progression**:
-   - Ensure inputs can navigate menus and start the game properly.
-   - **Note on Automation:** The `paranoiascape-recomp/play_game.py` script currently hangs in an infinite while loop waiting for `0x0000000F` from RAM address `0x8013DC60` because the debug server returns RAM reads in little-endian format (which outputs `0f000000`). Modifying the condition to look for `0f000000` will unblock the automated menu navigation script.
-   - Run additional gameplay tests to confirm that no other stack pointer leaks are triggered in other sections of the game.
-2. **Track gameplay frame rates and rendering**:
+1. **Verify gameplay rendering stability**:
    - Verify that 3D visuals and backgrounds remain stable as the player progresses through Stage 1.
+   - Run additional gameplay tests to confirm that no other stack pointer leaks or callback stalls are triggered during real-time gameplay.
+2. **Review snapshot display timings**:
+   - Check if gameplay rendering exhibits any frame-buffering timing glitches or black areas, particularly around menu-to-stage boundaries.
