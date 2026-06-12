@@ -3413,7 +3413,10 @@ void inject_pad_state(void) {
 int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
     /* [VBLANK-PUMP] Generic background VBlank pump to drive asynchronous task queues
      * (like CD-ROM / loading callbacks) if the game gets stuck in any loop that bypasses VSync.
-     * We throttle the performance counter check to once every 20,000 dispatches. */
+     * We throttle the performance counter check to once every 20,000 dispatches.
+     * Note: We do not use static lock flags (e.g. s_in_background_pump) to guard calls because
+     * fiber context switches/yields inside func_80051434 can cause the flag to remain set forever.
+     * Instead, we update last_pump *before* calling the handler to prevent re-entrancy. */
     static uint32_t s_disp_pump_count = 0;
     if (++s_disp_pump_count % 20000 == 0) {
         static LARGE_INTEGER freq = {0};
@@ -3425,9 +3428,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         double elapsed = (double)(now.QuadPart - last_pump.QuadPart) / freq.QuadPart;
-        static int s_in_background_pump = 0;
-        if (!s_in_background_pump && elapsed >= 1.0 / 60.0) {
-            s_in_background_pump = 1;
+        if (elapsed >= 1.0 / 60.0) {
             double tick_duration = 1.0 / 60.0;
             uint32_t ticks = (uint32_t)(elapsed / tick_duration);
             if (ticks > 0) {
@@ -3440,7 +3441,6 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             memcpy(saved_regs, cpu, 35 * sizeof(uint32_t));
             func_80051434(cpu);
             memcpy(cpu, saved_regs, 35 * sizeof(uint32_t));
-            s_in_background_pump = 0;
         }
     }
 
@@ -3523,7 +3523,8 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
     }
     if (addr == 0x80055F44u) {
         /* [VBLANK-PUMP] If the game loop is spinning bypassing VSync (gp + 436 == 0),
-         * pump the VBlank handler at 60Hz. */
+         * pump the VBlank handler at 60Hz.
+         * Note: We update last *before* calling the handler to prevent re-entrancy. */
         uint8_t gp436 = g_ram[(cpu->gp & 0x1FFFFF) + 436];
         if (gp436 == 0) {
             static LARGE_INTEGER freq = {0};
@@ -3535,9 +3536,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             LARGE_INTEGER now;
             QueryPerformanceCounter(&now);
             double elapsed = (double)(now.QuadPart - last.QuadPart) / freq.QuadPart;
-            static int s_in_vblank = 0;
-            if (!s_in_vblank && elapsed >= 1.0 / 60.0) {
-                s_in_vblank = 1;
+            if (elapsed >= 1.0 / 60.0) {
                 double tick_duration = 1.0 / 60.0;
                 uint32_t ticks = (uint32_t)(elapsed / tick_duration);
                 if (ticks > 0) {
@@ -3555,7 +3554,6 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
                 
                 /* Restore original state */
                 memcpy(cpu, saved_regs, 35 * sizeof(uint32_t));
-                s_in_vblank = 0;
             }
         }
         return 0; // execute original function natively
