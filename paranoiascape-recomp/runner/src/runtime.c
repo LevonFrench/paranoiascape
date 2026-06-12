@@ -3411,6 +3411,39 @@ void inject_pad_state(void) {
 }
 
 int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
+    /* [VBLANK-PUMP] Generic background VBlank pump to drive asynchronous task queues
+     * (like CD-ROM / loading callbacks) if the game gets stuck in any loop that bypasses VSync.
+     * We throttle the performance counter check to once every 20,000 dispatches. */
+    static uint32_t s_disp_pump_count = 0;
+    if (++s_disp_pump_count % 20000 == 0) {
+        static LARGE_INTEGER freq = {0};
+        static LARGE_INTEGER last_pump = {0};
+        if (freq.QuadPart == 0) {
+            QueryPerformanceFrequency(&freq);
+            QueryPerformanceCounter(&last_pump);
+        }
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double elapsed = (double)(now.QuadPart - last_pump.QuadPart) / freq.QuadPart;
+        static int s_in_background_pump = 0;
+        if (!s_in_background_pump && elapsed >= 1.0 / 60.0) {
+            s_in_background_pump = 1;
+            double tick_duration = 1.0 / 60.0;
+            uint32_t ticks = (uint32_t)(elapsed / tick_duration);
+            if (ticks > 0) {
+                last_pump.QuadPart += (LONGLONG)(ticks * tick_duration * freq.QuadPart);
+            } else {
+                last_pump = now;
+            }
+            extern void func_80051434(CPUState*);
+            uint32_t saved_regs[35];
+            memcpy(saved_regs, cpu, 35 * sizeof(uint32_t));
+            func_80051434(cpu);
+            memcpy(cpu, saved_regs, 35 * sizeof(uint32_t));
+            s_in_background_pump = 0;
+        }
+    }
+
     if (addr == 0x80022060u || addr == 0x80024808u || addr == 0x8008C8A4u) {
         printf("[OVERRIDE-SP] addr=0x%08X sp=0x%08X ra=0x%08X f%u\n", addr, cpu->sp, cpu->ra, g_ps1_frame);
         fflush(stdout);
