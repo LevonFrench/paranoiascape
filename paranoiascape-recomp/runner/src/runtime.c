@@ -3487,27 +3487,33 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
     }
 
     /* [CDROM] Boot overrides */
-    if (addr == 0x800804F4u) {
+    if (addr == 0x800804C0u) {
         extern int debug_server_get_input_override(void);
         int override = debug_server_get_input_override();
-        uint16_t buttons = (override != -1) ? (uint16_t)override : 0;
+        extern uint16_t g_pad1_state;
+        uint16_t buttons = (override != -1) ? (uint16_t)override : g_pad1_state;
         
-        if (buttons & 0x0008) { /* START pressed */
-            /* Force the exit conditions for func_8007F754! */
-            /* 1. func_800804F4 returns 0 to allow checking exit condition */
-            cpu->v0 = 0;
-            
-            /* 2. We need *(uint32_t*)( *(uint32_t*)(0x800A5560) ) & 0x04000000 to be non-zero */
+        if (buttons & 0x4008) { /* START (0x0008) or CROSS (0x4000) pressed */
             uint32_t ptr = *(uint32_t*)(g_ram + 0xA5560);
-            if (ptr != 0) {
-                uint32_t val = *(uint32_t*)(g_ram + (ptr & 0x1FFFFFFF));
+            uint32_t offset = ptr & 0x1FFFFFFF;
+            if (ptr >= 0x80000000u && offset < 2 * 1024 * 1024 - 4) {
+                /* Force the exit conditions for func_8007F754! */
+                /* 1. func_800804C0 returns 0 to allow checking exit condition */
+                cpu->v0 = 0;
+                
+                /* 2. We need *(uint32_t*)( *(uint32_t*)(0x800A5560) ) & 0x04000000 to be non-zero */
+                uint32_t val = *(uint32_t*)(g_ram + offset);
                 val |= 0x04000000;
-                *(uint32_t*)(g_ram + (ptr & 0x1FFFFFFF)) = val;
+                *(uint32_t*)(g_ram + offset) = val;
+                
+                printf("[FMV-SKIP] Hooked 800804C0! Forcing exit conditions (v0=0, bit set)!\n");
+            } else {
+                /* Standard FMV skip: return -1 */
+                cpu->v0 = (uint32_t)-1;
+                printf("[FMV-SKIP] Hooked 800804C0! Returning -1 to skip FMV!\n");
             }
-            
-            printf("[FMV-SKIP] Hooked 800804F4! Forcing exit conditions!\n");
             fflush(stdout);
-            return 1; /* Skip func_800804F4 execution */
+            return 1; /* Skip func_800804C0 execution */
         }
         return 0; /* run natively */
     }
