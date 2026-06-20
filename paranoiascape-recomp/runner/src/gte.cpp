@@ -111,15 +111,15 @@ static void depth_cue_from_ir(GTEState* gte) {
 // ---------------------------------------------------------------------------
 void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0) {
     // Step 1: Matrix multiplication + translation
-    int64_t mac1 = (int64_t)gte->TR[0] +
+    int64_t mac1 = ((int64_t)gte->TR[0] << 12) +
                    (int64_t)gte->RT[0][0] * V[0] +
                    (int64_t)gte->RT[0][1] * V[1] +
                    (int64_t)gte->RT[0][2] * V[2];
-    int64_t mac2 = (int64_t)gte->TR[1] +
+    int64_t mac2 = ((int64_t)gte->TR[1] << 12) +
                    (int64_t)gte->RT[1][0] * V[0] +
                    (int64_t)gte->RT[1][1] * V[1] +
                    (int64_t)gte->RT[1][2] * V[2];
-    int64_t mac3 = (int64_t)gte->TR[2] +
+    int64_t mac3 = ((int64_t)gte->TR[2] << 12) +
                    (int64_t)gte->RT[2][0] * V[0] +
                    (int64_t)gte->RT[2][1] * V[1] +
                    (int64_t)gte->RT[2][2] * V[2];
@@ -814,6 +814,18 @@ extern "C" void gte_execute(CPUState* cpu, uint32_t cmd) {
 
     /* Diagnostic: log when RTPS/RTPT produces FLAG error bit (bit 31) */
     extern uint32_t g_ps1_frame;
+    if (g_ps1_frame >= 13035 && g_ps1_frame <= 13045) {
+        if (func == 0x01 || func == 0x30) {
+            printf("[GTE-DIAG] f%u func=0x%02X FLAG=0x%08X V0=(%d,%d,%d) TR=(%d,%d,%d) H=%u SZ3=%u SXY=0x%08X ra=0x%08X\n",
+                   g_ps1_frame, func, cpu->gte_ctrl[31],
+                   gte.V0[0], gte.V0[1], gte.V0[2],
+                   gte.TR[0], gte.TR[1], gte.TR[2],
+                   gte.H, gte.SZ[3],
+                   cpu->gte_data[14], cpu->ra);
+            fflush(stdout);
+        }
+    }
+    
     if ((func == 0x01 || func == 0x30) && (cpu->gte_ctrl[31] & 0x80000000u)) {
         static int s_flag_err = 0;
         static uint32_t s_last_frame = 0;

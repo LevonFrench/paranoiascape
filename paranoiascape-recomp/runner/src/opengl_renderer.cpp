@@ -154,6 +154,8 @@ void OpenGLRenderer::Shutdown() {
     printf("[OpenGLRenderer] Shutdown complete\n");
 }
 
+extern "C" uint32_t g_ps1_frame;
+
 //==============================================================================
 // Primitive Rendering
 //==============================================================================
@@ -187,13 +189,29 @@ void OpenGLRenderer::DrawTriangle(const Vertex v[3], const DrawState& state) {
         ? (uint32_t)v[1].texpage_y
         : (uint32_t)state.texpage_y_base) % 2;
 
+    if (g_ps1_frame >= 8000 && g_ps1_frame <= 8010) {
+        static int s_dt_cnt = 0;
+        if (s_dt_cnt < 200) {
+            s_dt_cnt++;
+            printf("[DrawTriangle-DIAG] f%u #%d: state.textured=%d xy0=(%d,%d) xy1=(%d,%d) xy2=(%d,%d) tpg=(%d,%d) depth=%u clut=(%d,%d)\n",
+                   g_ps1_frame, s_dt_cnt, state.textured,
+                   v[0].x, v[0].y, v[1].x, v[1].y, v[2].x, v[2].y,
+                   (int)eff_texpage_x * 64, (int)eff_texpage_y * 256,
+                   eff_depth,
+                   v[0].has_clut ? v[0].clut_x : -1,
+                   v[0].has_clut ? v[0].clut_y : -1);
+            fflush(stdout);
+        }
+    }
+
 
 
     // Block all textured draws that sample from the FMV VRAM regions (pages 0-4 or 10-12 at Y=0) during FMV
-    if (state.textured && fmv_player_is_displaying() && eff_texpage_y == 0 &&
+    // COMMENTED OUT: This blocks gameplay geometry (loaded in pages 1-3) during in-game FMV playback.
+    /* if (state.textured && fmv_player_is_displaying() && eff_texpage_y == 0 &&
         ((eff_texpage_x >= 0 && eff_texpage_x <= 4) || (eff_texpage_x >= 10 && eff_texpage_x <= 12))) {
         return;
-    }
+    } */
 
     // Block the game's own FMV background primitives that sample from VRAM.
     // These are 8-bit textured primitives (depth=1) that use CLUT=(0, 511) on the FMV page (X=640, Y=0).
@@ -412,11 +430,12 @@ void OpenGLRenderer::DrawRectangle(int x, int y, int w, int h,
 
 
     // Block all textured draws that sample from the FMV VRAM regions (pages 0-4 or 10-12 at Y=0) during FMV
-    if (state.textured && fmv_player_is_displaying() && state.texpage_y_base == 0 &&
+    // COMMENTED OUT: This blocks gameplay geometry (loaded in pages 1-3) during in-game FMV playback.
+    /* if (state.textured && fmv_player_is_displaying() && state.texpage_y_base == 0 &&
         ((state.texpage_x_base >= 0 && state.texpage_x_base <= 4) || 
          (state.texpage_x_base >= 10 && state.texpage_x_base <= 12))) {
         return;
-    }
+    } */
 
     // Block the game's own FMV background primitives that sample from VRAM.
     // These are 8-bit textured primitives (depth=1) that use CLUT=(0, 511) on the FMV page (X=640, Y=0).
@@ -1275,8 +1294,8 @@ uniform bool uSetMaskBit;        // Set mask bit when drawing?
 
 // Sample 15-bit direct color texture
 vec4 SampleTexture15Bit(vec2 uv, vec2 texpage) {
-    int u_pixel = int(uv.x * 255.0);
-    int v_pixel = int(uv.y * 255.0);
+    int u_pixel = int(uv.x * 255.0 + 0.5);
+    int v_pixel = int(uv.y * 255.0 + 0.5);
 
     // Apply texture window bitwise logic (E2h)
     u_pixel = (u_pixel & int(uTextureWindow.x)) | int(uTextureWindow.z);
@@ -1291,8 +1310,8 @@ vec4 SampleTexture15Bit(vec2 uv, vec2 texpage) {
 
 // Sample 4-bit CLUT indexed texture
 vec4 SampleTexture4Bit(vec2 uv, vec2 texpage, vec2 clut) {
-    int u_pixel = int(uv.x * 255.0);
-    int v_pixel = int(uv.y * 255.0);
+    int u_pixel = int(uv.x * 255.0 + 0.5);
+    int v_pixel = int(uv.y * 255.0 + 0.5);
 
     // Apply texture window bitwise logic (E2h)
     u_pixel = (u_pixel & int(uTextureWindow.x)) | int(uTextureWindow.z);
@@ -1329,8 +1348,8 @@ vec4 SampleTexture4Bit(vec2 uv, vec2 texpage, vec2 clut) {
 
 // Sample 8-bit CLUT indexed texture
 vec4 SampleTexture8Bit(vec2 uv, vec2 texpage, vec2 clut) {
-    int u_pixel = int(uv.x * 255.0);
-    int v_pixel = int(uv.y * 255.0);
+    int u_pixel = int(uv.x * 255.0 + 0.5);
+    int v_pixel = int(uv.y * 255.0 + 0.5);
 
     // Apply texture window bitwise logic (E2h)
     u_pixel = (u_pixel & int(uTextureWindow.x)) | int(uTextureWindow.z);

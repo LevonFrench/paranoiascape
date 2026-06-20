@@ -1565,8 +1565,9 @@ static int mips_exec_one(CPUState* cpu, uint32_t* R[32],
         case 0x2A: *R[rd] = (int32_t)*R[rs] < (int32_t)*R[rt] ? 1 : 0; break; /* SLT  */
         case 0x2B: *R[rd] = *R[rs] < *R[rt] ? 1 : 0; break;                   /* SLTU */
         default:
-            printf("[INTERP] SPECIAL funct=0x%02X at 0x%08X\n", funct, pc);
-            fflush(stdout);
+            // printf("[INTERP] SPECIAL funct=0x%02X at 0x%08X\n", funct, pc);
+            // fflush(stdout);
+            break;
         }
         return 0;
 
@@ -1589,8 +1590,9 @@ static int mips_exec_one(CPUState* cpu, uint32_t* R[32],
             *is_link_out = (*target_out != (pc + 8));
             return 1;
         default:
-            printf("[INTERP] REGIMM rt=0x%02X at 0x%08X\n", rt, pc);
-            fflush(stdout);
+            // printf("[INTERP] REGIMM rt=0x%02X at 0x%08X\n", rt, pc);
+            // fflush(stdout);
+            break;
         }
         return 0;
 
@@ -1667,8 +1669,8 @@ static int mips_exec_one(CPUState* cpu, uint32_t* R[32],
         cpu->write_word(*R[rs]+(uint32_t)simm, gte_read_data(cpu, (uint8_t)rt));
         return 0;
     default:
-        printf("[INTERP] opcode=0x%02X at 0x%08X instr=0x%08X\n", op, pc, instr);
-        fflush(stdout);
+        // printf("[INTERP] opcode=0x%02X at 0x%08X instr=0x%08X\n", op, pc, instr);
+        // fflush(stdout);
         return 0;
     }
 }

@@ -63,13 +63,15 @@ extern "C" {
     void gpu_write_gp1(uint32_t word) { if (g_gpu) g_gpu->WriteGP1(word); }
     void gpu_abort_streaming() { if (g_gpu) g_gpu->AbortStreaming(); }
     static uint16_t keyboard_get_pad() {
-        // Frame-based automation sequence to boot into gameplay
+        // Frame-based automation sequence to boot into gameplay (COMMENTED OUT to avoid collision with python scripts)
+        /*
         if (g_ps1_frame >= 100 && g_ps1_frame <= 120) return 0x0008; // START (skip FMV)
         if (g_ps1_frame >= 1000 && g_ps1_frame <= 1020) return 0x0008; // START (start menu)
         if (g_ps1_frame >= 1140 && g_ps1_frame <= 1160) return 0x2000; // CIRCLE (Game Start)
         if (g_ps1_frame >= 1280 && g_ps1_frame <= 1300) return 0x0040; // DOWN (select Stage Select / New Game)
         if (g_ps1_frame >= 1420 && g_ps1_frame <= 1440) return 0x2000; // CIRCLE (confirm)
         if (g_ps1_frame >= 1560 && g_ps1_frame <= 1580) return 0x4000; // CROSS (skip tutorial)
+        */
 
         int input_override = debug_server_get_input_override();
         if (input_override != -1) return (uint16_t)input_override;
@@ -185,7 +187,7 @@ extern "C" {
                 s_f11_was_pressed = f11_now;
 
                 /* Auto-screenshot at milestones */
-                static uint32_t s_auto_milestones[] = {10, 30, 50, 70, 100, 500, 855, 858, 860, 861, 862, 863, 864, 865, 866, 867, 868, 869, 870, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2910, 2920, 2930, 3000, 3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 4400, 4500, 4600, 4700, 4800, 4900, 5000, 10000, 10450, 13000, 13100, 13500, 14000, 15000, 18000, 20000, 25000};
+                static uint32_t s_auto_milestones[] = {10, 30, 50, 70, 100, 500, 855, 858, 860, 861, 862, 863, 864, 865, 866, 867, 868, 869, 870, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2910, 2920, 2930, 3000, 3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 4400, 4500, 4600, 4700, 4800, 4900, 5000, 6000, 6200, 6400, 6600, 6800, 7000, 7200, 10000, 10450, 13000, 13100, 13500, 14000, 15000, 18000, 20000, 25000};
                 static int s_auto_idx = 0;
                 int n_milestones = (int)(sizeof(s_auto_milestones) / sizeof(s_auto_milestones[0]));
                 if (s_auto_idx < n_milestones && g_ps1_frame >= s_auto_milestones[s_auto_idx]) {
@@ -241,6 +243,8 @@ extern "C" {
 }
 
 extern "C" void psxrecomp_runner_run(int argc, char** argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     timeBeginPeriod(1);
     printf("[Runner] Entry\n");
     fflush(stdout);
