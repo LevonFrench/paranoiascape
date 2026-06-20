@@ -1,3 +1,16 @@
+---
+title: "Paranoiascape State Machine Update"
+category: concept
+sources: []
+compiled-from: conversation
+created: 2026-05-10
+updated: 2026-06-19
+tags: [psx, recomp, state-machine, input]
+confidence: high
+summary: "Tracks the discovery of the engine state machine variables, correcting previous state injection hacks in favor of native controller inputs."
+volatility: warm
+---
+
 # Paranoiascape State Machine and Input Update (2026-05-10)
 
 ## TL;DR

@@ -108,6 +108,37 @@ GhidraMCP runs as an HTTP server on `localhost:8080`. Use `read_url_content` to 
 - When visual verification is needed, **ask the user** to check the game window and describe or screenshot what they see.
 - Use VRAM dumps (`SaveVRAMDumpBMP`) and automated screenshots (`SaveScreenshotBMP`) for programmatic checks, but remember these read from the FBO, not the display window.
 
+### Rule 0l: Keep Debug Server Polled During Long Loops
+- Long-running MIPS execution blocks (such as file streaming, sector loading, or decompression) bypass the runner's frame loop.
+- If `debug_server_poll()` is only called in `VSync` or the main frame loop, the TCP socket will become unresponsive and time out during these MIPS blocks.
+- Ensure `debug_server_poll()` is called from a throttled counter (e.g. every 20,000 instructions) in the dispatch override function `psx_override_dispatch` to keep the TCP connection alive.
+
+### Rule 0m: Match Active-Low Input Constraints in Injection
+- PS1 controller states are active-low (bit cleared = button pressed).
+- Games often implement edge-triggering logic comparing current and previous states, expecting both the direct pad buffer and the pressed/released edge-trigger buffers to be active-low.
+- When writing automation commands or intercepts that simulate inputs, ensure the bitwise arithmetic matches the active-low convention for all input state buffers.
+
+### Rule 0n: Validate DMA Transfer Lengths & Route Fatals to Diagnostics
+- All SPU/GPU/CDROM DMA transfer channels (e.g., DMA2, DMA4) must validate BCR-derived block sizes and word counts before execution. Set sanity caps (e.g., max 2MB) to prevent corrupt registers from triggering runaway loops or out-of-bounds memory accesses.
+- Rather than calling abrupt `exit(1)` or `abort()` upon encountering unhandled DMA modes, unknown register writes, or unimplemented GPU command opcodes, the runner must route execution to a diagnostic halt state (`psx_fatal_halt` or similar) that prints a detailed crash message to a file (`psx_crash.txt`) but keeps the process thread active. This ensures the TCP debug socket remains open to allow post-mortem memory/state introspection.
+
+### Rule 0o: Interpreter Return Contract (Stop Address)
+- The MIPS interpreter ([mips_interpret](file:///j:/projects/paranoia/paranoiascape-recomp/runner/src/runtime.c#L1710)) and dynamic call dispatcher ([call_by_address](file:///j:/projects/paranoia/paranoiascape-recomp/runner/src/runtime.c#L1938)) must strictly respect return contracts when guest code transfers control.
+- If the interpreter is executing instructions in RAM (such as self-modifying code or dynamically loaded overlays) and reaches the return target of the host caller, it MUST immediately exit and return control to the native caller. Failing to respect the `stop_addr` return contract will cause the interpreter to continue executing the native caller's code on the guest stack, leading to stack pointer misalignment, registry corruption, and fatal MMIO faults.
+
+### Rule 0p: Strict Log Hygiene & Debug Server Instrumentation
+- Do **not** use verbose console `printf` or `fprintf(stderr, ...)` debugging in the main game loops or high-frequency instructions. Doing so easily bloats disk usage with multi-GB `game_diag.log` trace logs, causing disk exhaustion.
+- Instead of raw file/console printing, instrument the runtime via the TCP debug server commands (e.g., `read_ram`, `write_ram`, `wtrace`) to retrieve state data dynamically. If a new variable or array requires inspection, add a dedicated TCP debug command handler in `debug_server.c` instead of writing logs to files.
+
+### Rule 0q: Broken Tooling Is Never Acceptable
+- If a verification tool (like the `pcsx_cmd.py` controller injector, a screenshot command, or a GDB/Ghidra connection) breaks or returns unexpected values, **stop and fix the tool immediately** before continuing the main task.
+- Do not route around broken tooling using speculative logic, indirect evidence, or by claiming "the issue is a caveat to live with." A broken tool is a compounding technical debt that degrades all future analysis.
+
+### Rule 0r: Don't Accept Partial Milestones / No Speculative Progress
+- Phase/task completion requires verifying the user-visible end state (e.g., actual pixels rendering on the screen, correct state transitions on RAM buffers, or assets successfully loading from the CD image). 
+- Never declare a milestone completed based on speculation like "I think it should work now" or because mock wrappers pretend a function worked without actual system integration. Verify actual behavior against the emulator ground truth.
+
+
 1. Think Before Coding
 Don't assume. Don't hide confusion. Surface tradeoffs.
 
@@ -184,15 +215,58 @@ You are not a monolithic assistant; you are the Reasoning Core of a Mixture of M
 
 ---
 
-## 12. Knowledge Wiki
+## 12. Knowledge Wiki (LLM-Wiki Protocol)
 
-To effectively assist with tasks in this repository, you must consult our knowledge base. 
+To effectively assist with tasks in this repository, you must consult and maintain our knowledge base. The knowledge base is structured using the **[LLM-Wiki Protocol](https://github.com/nvk/llm-wiki)**.
 
-Please refer to the **[Knowledge Wiki](./wiki/README.md)** for:
-- Established patterns in PSX reverse engineering
-- Existing guides, tools, and best practices.
+Please refer to the **[Knowledge Base Index](./wiki/_index.md)** as the entry point.
 
-Always make sure to keep the wiki updated when you discover new technical details or complete significant milestones in any of the sub-projects.
+### A. Directory Structure
+The Knowledge Base directory (`./wiki/`) is organized as follows:
+- **`config.md`**: Defines scope, title, and conventions.
+- **`log.md`**: Append-only activity log for operations (e.g. `## [YYYY-MM-DD] compile | Description`).
+- **`_index.md`**: Master index of the KB containing navigation, statistics, and quick references.
+- **`raw/`**: Immutable raw source files (articles, papers, repos, notes, data), each with YAML frontmatter.
+  - Notes added during sessions or from feedback go to `raw/notes/`.
+- **`wiki/`**: Compiled, synthesized articles maintained by the agent.
+  - `wiki/concepts/`: Bounded concepts, bug fixes, or register descriptions.
+  - `wiki/topics/`: Broad thematic guides or subsystem architectures.
+  - `wiki/references/`: Curated reference tables or maps.
+  - `wiki/theses/`: Thesis investigations.
+- **`output/`**: Generated artifacts or deliverables.
+- **`inbox/`**: Temp zone for incoming files. Processed files move to `inbox/.processed/`.
+
+### B. Core Principles
+1. **One topic, one wiki**: Ensure all contents remain focused on Paranoiascape recompilation and reverse engineering.
+2. **Indexes are navigation**: Every directory must contain an `_index.md`. Never traverse directory structures blindly.
+3. **Raw is immutable**: All raw sources are read-only once saved. Synthesis and corrections happen in `wiki/`.
+4. **Dual-Linking**: All cross-references must use both formats on the same line:
+   `[[slug|Name]] ([Name](../category/slug.md))`
+5. **Confidence Scoring**: Include a `confidence` rating (`high|medium|low`) in frontmatter.
+6. **Compiled-from Exemption**: If compiled articles are manually authored or extracted from conversation context rather than external sources, use `compiled-from: conversation` in the YAML frontmatter.
+
+### C. File Formats & Metadata
+Every compiled article in `wiki/` must begin with YAML frontmatter:
+```yaml
+---
+title: "Article Title"
+category: concept|topic|reference
+sources: []
+compiled-from: conversation
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+tags: [tag1, tag2]
+confidence: high|medium|low
+summary: "2-3 sentence summary"
+volatility: warm|cold|hot
+---
+```
+
+### D. Maintenance & Verification (Linter)
+Validate the wiki structure using the local Python tool.
+- **Run check**: `python j:/projects/paranoia/llm-wiki/scripts/llm-wiki lint j:/projects/paranoia/wiki`
+- **Auto-fix (generates/fixes indexes, corrects placement, etc.)**: `python j:/projects/paranoia/llm-wiki/scripts/llm-wiki lint --fix j:/projects/paranoia/wiki`
+Always run the linter and ensure it passes (0 errors/warnings) after any knowledge wiki modification.
 
 ## 13. PSXRecomp Hardcoded Tomba Context
 

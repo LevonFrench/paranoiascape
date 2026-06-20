@@ -1,3 +1,16 @@
+---
+title: "Recompiler Stack Leak And Vblank Pump Fix"
+category: concept
+sources: []
+compiled-from: conversation
+created: 2026-06-06
+updated: 2026-06-19
+tags: [psx, recomp, stack, vblank]
+confidence: high
+summary: "Resolves the title screen stack pointer leak (MIPS-to-C return boundary) and the gameplay loading deadlock via 60Hz VBlank interrupt simulation."
+volatility: warm
+---
+
 # Recompiler Stack Pointer Leak & VBlank Pump Deadlock Fix
 
 Documenting the two major technical achievements that resolved systemic memory corruption and gameplay loading stalls.

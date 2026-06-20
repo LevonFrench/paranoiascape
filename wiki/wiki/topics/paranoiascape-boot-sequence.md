@@ -1,3 +1,16 @@
+---
+title: "Paranoiascape Boot Sequence"
+category: topic
+sources: []
+compiled-from: conversation
+created: 2026-05-01
+updated: 2026-06-19
+tags: [psx, recomp, boot, stack]
+confidence: high
+summary: "Details the load address hardcode bug at 0x8000F000 and the BSS clearing loop recursion stack overflow fix."
+volatility: warm
+---
+
 # Paranoiascape Boot Sequence Root Cause Analysis
 
 ## 1. The Load Address Hardcode Bug

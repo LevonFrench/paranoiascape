@@ -1,3 +1,16 @@
+---
+title: "Paranoiascape Input Graphics"
+category: topic
+sources: []
+compiled-from: conversation
+created: 2026-05-01
+updated: 2026-06-19
+tags: [psx, recomp, input, graphics]
+confidence: high
+summary: "Explains the SIO polling buffer at 0x8013E5EC, pcsx_cmd.py injection to bypass menu gates, and root cause analysis of squashed Title Screen graphics."
+volatility: warm
+---
+
 # Paranoiascape Input Injection and Title Screen Graphics
 
 ## Input Injection & Bypassing the Title Screen

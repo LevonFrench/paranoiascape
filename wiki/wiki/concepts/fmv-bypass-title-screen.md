@@ -1,3 +1,16 @@
+---
+title: "Fmv Bypass Title Screen"
+category: concept
+sources: []
+compiled-from: conversation
+created: 2026-05-10
+updated: 2026-06-19
+tags: [psx, recomp, fmv, title-screen]
+confidence: high
+summary: "Covers the SIO write_half loop fix and the func_8001E468 FMV stream bypass to successfully boot to the 3D spinning eye Title Screen."
+volatility: warm
+---
+
 # FMV Boot Bypass & Title Screen (Updated 2026-05-30)
 
 ## TL;DR

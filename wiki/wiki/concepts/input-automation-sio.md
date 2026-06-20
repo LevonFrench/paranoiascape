@@ -1,3 +1,16 @@
+---
+title: "Input Automation Sio"
+category: concept
+sources: []
+compiled-from: conversation
+created: 2026-05-10
+updated: 2026-06-19
+tags: [psx, recomp, input, sio]
+confidence: high
+summary: "Detailed analysis of the SIO pad polling logic, active-low edge triggers, and the button sequence needed to bypass the Main Menu overlay."
+volatility: warm
+---
+
 # Paranoiascape Input Automation & SIO Emulation
 
 ## The SIO Emulation Problem

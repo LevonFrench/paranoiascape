@@ -29,7 +29,6 @@
  */
 #include "xa_audio.h"
 #include <windows.h>
-#include <mmsystem.h>
 #include <cstdio>
 #include <cstring>
 #include <atomic>
@@ -68,10 +67,6 @@ static constexpr uint32_t WAV_CAPTURE_PAIRS = (uint32_t)SAMPLE_RATE * 30; /* 30 
 /* ---- global state ---- */
 static float              g_volume = 0.5f; /* 0.0-1.0, default 50% */
 static FILE*              g_bin  = nullptr;
-static HWAVEOUT           g_wave = NULL;
-static WAVEHDR            g_hdrs[NUM_BUFS];
-static int16_t            g_pcm[NUM_BUFS][SAMPLES_PER_BUF * CHANNELS];
-static HANDLE             g_done_event = NULL;
 
 static std::thread             g_thread;
 static std::atomic<bool>       g_running{false};
@@ -84,6 +79,12 @@ static uint8_t  g_xa_channel = 0xFF;
 /* WAV capture (written from audio thread only) */
 static FILE*     g_wav_out     = nullptr;
 static uint32_t  g_wav_samples = 0;   /* stereo pairs written */
+
+/* ---- Circular Buffer ---- */
+static constexpr int RING_BUF_SAMPLES = SAMPLES_PER_BUF * 8; // 32768 stereo samples
+static int16_t g_ring_buf[RING_BUF_SAMPLES * CHANNELS];
+static std::atomic<size_t> g_ring_write{0};
+static std::atomic<size_t> g_ring_read{0};
 
 /* ---------------------------------------------------------------------------
  * XA-ADPCM sector decode
@@ -151,17 +152,39 @@ static int xa_decode_sector(const uint8_t* data,  /* XA_DATA_SIZE bytes */
     return pair; /* = 18 groups × 4 blocks × 28 = 2016 */
 }
 
-/* Submit one fully-filled waveOut buffer */
-static void submit_buf(int idx)
-{
-    WAVEHDR* h = &g_hdrs[idx];
-    if (h->dwFlags & WHDR_PREPARED)
-        waveOutUnprepareHeader(g_wave, h, sizeof(WAVEHDR));
-    h->lpData        = reinterpret_cast<LPSTR>(g_pcm[idx]);
-    h->dwBufferLength = BYTES_PER_BUF;
-    h->dwFlags       = 0;
-    waveOutPrepareHeader(g_wave, h, sizeof(WAVEHDR));
-    waveOutWrite(g_wave, h, sizeof(WAVEHDR));
+static size_t get_free() {
+    size_t w = g_ring_write.load(std::memory_order_relaxed);
+    size_t r = g_ring_read.load(std::memory_order_relaxed);
+    if (w >= r) return RING_BUF_SAMPLES - 1 - (w - r);
+    return r - w - 1;
+}
+
+static size_t ring_write(const int16_t* data, size_t pairs) {
+    size_t w = g_ring_write.load(std::memory_order_relaxed);
+    size_t r = g_ring_read.load(std::memory_order_relaxed);
+    size_t free_slots = (w >= r) ? (RING_BUF_SAMPLES - 1 - (w - r)) : (r - w - 1);
+    size_t to_write = (pairs < free_slots) ? pairs : free_slots;
+    for (size_t i = 0; i < to_write; i++) {
+        g_ring_buf[w * 2]     = data[i * 2];
+        g_ring_buf[w * 2 + 1] = data[i * 2 + 1];
+        w = (w + 1) % RING_BUF_SAMPLES;
+    }
+    g_ring_write.store(w, std::memory_order_release);
+    return to_write;
+}
+
+extern "C" size_t xa_audio_read_pcm(int16_t* out, size_t pairs) {
+    size_t w = g_ring_write.load(std::memory_order_acquire);
+    size_t r = g_ring_read.load(std::memory_order_relaxed);
+    size_t avail = (w >= r) ? (w - r) : (RING_BUF_SAMPLES - (r - w));
+    size_t to_read = (pairs < avail) ? pairs : avail;
+    for (size_t i = 0; i < to_read; i++) {
+        out[i * 2]     = g_ring_buf[r * 2];
+        out[i * 2 + 1] = g_ring_buf[r * 2 + 1];
+        r = (r + 1) % RING_BUF_SAMPLES;
+    }
+    g_ring_read.store(r, std::memory_order_release);
+    return to_read;
 }
 
 /* ---------------------------------------------------------------------------
@@ -175,15 +198,9 @@ static void audio_thread()
 
     int sect_pos  = 0; /* drain position within sect_pcm (in stereo pairs) */
     int sect_rem  = 0; /* undrained stereo pairs from last decoded sector */
-    int buf_pos   = 0; /* fill position within current waveOut buffer */
-    int buf_idx   = 0; /* current waveOut buffer index */
     uint32_t lba  = UINT32_MAX;
     int no_audio  = 0; /* consecutive non-audio sectors counter */
 
-    /* Resampler state: linear interpolation from SAMPLE_RATE (37800) → OUTPUT_RATE (44100).
-     * resamp_phase is the fractional position within the current input sample pair,
-     * measured in units of OUTPUT_RATE (i.e. frac = resamp_phase / OUTPUT_RATE).
-     * Ratio: for every output sample we advance the read head by 37800/44100 = 6/7 input samples. */
     int32_t  resamp_phase = 0;
 
     while (g_running.load(std::memory_order_relaxed)) {
@@ -191,31 +208,26 @@ static void audio_thread()
         /* Pick up new seek request */
         uint32_t req = g_seek_lba.exchange(UINT32_MAX, std::memory_order_acq_rel);
         if (req != UINT32_MAX) {
+            g_ring_write.store(0, std::memory_order_relaxed);
+            g_ring_read.store(0, std::memory_order_relaxed);
             if (req == 0) {
-                /* LBA 0 = stop: flush queued WinMM buffers immediately and go idle */
-                waveOutReset(g_wave);
                 lba = UINT32_MAX;
                 prevL[0] = prevL[1] = prevR[0] = prevR[1] = 0;
                 sect_pos = sect_rem = 0;
-                buf_pos  = 0;
                 no_audio = 0;
                 resamp_phase = 0;
                 g_xa_file    = 0xFF;
                 g_xa_channel = 0xFF;
-                printf("[XA] Stop (waveOutReset)\n");
+                printf("[XA] Stop\n");
                 fflush(stdout);
             } else {
                 lba = req;
                 prevL[0] = prevL[1] = prevR[0] = prevR[1] = 0;
                 sect_pos = sect_rem = 0;
-                buf_pos  = 0;
                 no_audio = 0;
                 resamp_phase = 0;
-                g_xa_file    = 0xFF;  /* unlock channel — re-lock to first audio sector */
+                g_xa_file    = 0xFF;
                 g_xa_channel = 0xFF;
-                /* Reset WAV capture so each seek overwrites from the start.
-                 * This ensures xa_capture.wav always contains the most recent
-                 * audio track (typically title screen), not a mix of multiple seeks. */
                 if (g_wav_out) {
                     fseek(g_wav_out, 44, SEEK_SET);
                     g_wav_samples = 0;
@@ -227,119 +239,88 @@ static void audio_thread()
 
         if (lba == UINT32_MAX) { Sleep(10); continue; }
 
-        /* Fill the current waveOut buffer */
-        while (buf_pos < SAMPLES_PER_BUF && g_running.load(std::memory_order_relaxed)) {
-
-            /* Drain previously decoded sector — upsample 37800→44100 Hz with linear
-             * interpolation, then apply volume for waveOut submission.
-             * WAV capture is written at decode time (full precision, no resample). */
-            if (sect_rem > 0) {
-                int   space    = SAMPLES_PER_BUF - buf_pos;
-                float vol      = g_volume;
-                int   produced = 0;
-                while (produced < space && sect_rem > 0) {
-                    int16_t cL = sect_pcm[sect_pos * 2];
-                    int16_t cR = sect_pcm[sect_pos * 2 + 1];
-                    /* Peek at next input sample for interpolation; hold last at sector end */
-                    int16_t nL = (sect_rem > 1) ? sect_pcm[(sect_pos + 1) * 2]     : cL;
-                    int16_t nR = (sect_rem > 1) ? sect_pcm[(sect_pos + 1) * 2 + 1] : cR;
-                    /* Linear interpolation: out = c + (n - c) * phase / OUTPUT_RATE */
-                    int32_t lerpL = (int32_t)cL + (int32_t)(nL - cL) * resamp_phase / OUTPUT_RATE;
-                    int32_t lerpR = (int32_t)cR + (int32_t)(nR - cR) * resamp_phase / OUTPUT_RATE;
-                    g_pcm[buf_idx][(buf_pos + produced) * 2]     = (int16_t)(lerpL * vol);
-                    g_pcm[buf_idx][(buf_pos + produced) * 2 + 1] = (int16_t)(lerpR * vol);
-                    produced++;
-                    /* Advance read head by one input sample's worth of output */
-                    resamp_phase += SAMPLE_RATE;   /* +37800 */
-                    while (resamp_phase >= OUTPUT_RATE) {
-                        resamp_phase -= OUTPUT_RATE;   /* -44100 */
-                        sect_pos++;
-                        sect_rem--;
-                    }
-                }
-                buf_pos += produced;
+        if (sect_rem > 0) {
+            size_t free_slots = get_free();
+            if (free_slots == 0) {
+                Sleep(5);
                 continue;
             }
 
-            /* Read next sector */
-            long off = (long)((uint64_t)lba * RAW_SECTOR);
-            if (fseek(g_bin, off, SEEK_SET) != 0 ||
-                fread(raw, 1, RAW_SECTOR, g_bin) != RAW_SECTOR) {
-                lba = UINT32_MAX; /* end of file */
-                break;
-            }
-
-            uint8_t submode  = raw[XA_SUBHDR_OFF + 2];
-            uint8_t file_num = raw[XA_SUBHDR_OFF + 0];
-            uint8_t chan_num = raw[XA_SUBHDR_OFF + 1];
-
-            if (submode & SUBMODE_AUDIO) {
-                /* Lock channel on first audio sector seen after seek.
-                 * PS1 discs multiplex many channels; mixing them corrupts
-                 * the IIR filter state and produces garbled output. */
-                if (g_xa_file == 0xFF) {
-                    g_xa_file    = file_num;
-                    g_xa_channel = chan_num;
-                    uint8_t coding = raw[XA_SUBHDR_OFF + 3];
-                    /* codingInfo: bit0=stereo, bits2-3=rate(0=37800,1=18900), bits4-5=depth(0=4bit) */
-                    printf("[XA] Locked to file=%u ch=%u codingInfo=0x%02X (%s %s %s)\n",
-                           file_num, chan_num, coding,
-                           (coding & 0x01) ? "stereo" : "mono",
-                           ((coding >> 2) & 0x03) == 0 ? "37800Hz" : "18900Hz",
-                           ((coding >> 4) & 0x03) == 0 ? "4-bit" : "8-bit");
-                    fflush(stdout);
-                }
-
-                /* Any audio sector resets the no_audio watchdog */
-                no_audio = 0;
-
-                /* Decode only the locked channel; skip others silently */
-                if (file_num == g_xa_file && chan_num == g_xa_channel) {
-                    xa_decode_sector(raw + XA_DATA_OFF, sect_pcm, prevL, prevR);
-                    sect_pos = 0;
-                    sect_rem = SAMPLES_PER_SECTOR;
-
-                    /* WAV capture: write full-precision PCM for spectrogram analysis */
-                    if (g_wav_out && g_wav_samples < WAV_CAPTURE_PAIRS) {
-                        uint32_t space = WAV_CAPTURE_PAIRS - g_wav_samples;
-                        uint32_t n = ((uint32_t)SAMPLES_PER_SECTOR < space)
-                                     ? (uint32_t)SAMPLES_PER_SECTOR : space;
-                        fwrite(sect_pcm, sizeof(int16_t) * CHANNELS, n, g_wav_out);
-                        g_wav_samples += n;
-                    }
-                }
-            } else {
-                if (++no_audio > 20) {
-                    /* No audio sectors found — stop stream */
-                    printf("[XA] No audio sectors near LBA %u — stopping\n", lba);
-                    fflush(stdout);
-                    lba = UINT32_MAX;
-                    break;
+            float vol = g_volume;
+            int16_t temp_buf[512 * 2];
+            int to_gen = (free_slots < 512) ? (int)free_slots : 512;
+            int produced = 0;
+            while (produced < to_gen && sect_rem > 0) {
+                int16_t cL = sect_pcm[sect_pos * 2];
+                int16_t cR = sect_pcm[sect_pos * 2 + 1];
+                int16_t nL = (sect_rem > 1) ? sect_pcm[(sect_pos + 1) * 2]     : cL;
+                int16_t nR = (sect_rem > 1) ? sect_pcm[(sect_pos + 1) * 2 + 1] : cR;
+                int32_t lerpL = (int32_t)cL + (int32_t)(nL - cL) * resamp_phase / OUTPUT_RATE;
+                int32_t lerpR = (int32_t)cR + (int32_t)(nR - cR) * resamp_phase / OUTPUT_RATE;
+                temp_buf[produced * 2]     = (int16_t)(lerpL * vol);
+                temp_buf[produced * 2 + 1] = (int16_t)(lerpR * vol);
+                produced++;
+                resamp_phase += SAMPLE_RATE;
+                while (resamp_phase >= OUTPUT_RATE) {
+                    resamp_phase -= OUTPUT_RATE;
+                    sect_pos++;
+                    sect_rem--;
                 }
             }
-
-            lba++;
-
-            /* Check for a pending seek (abort current decode) */
-            if (g_seek_lba.load(std::memory_order_relaxed) != UINT32_MAX) break;
+            ring_write(temp_buf, produced);
+            continue;
         }
 
-        /* If the buffer is full, submit it and advance */
-        if (buf_pos >= SAMPLES_PER_BUF) {
-            submit_buf(buf_idx);
-            buf_idx = (buf_idx + 1) % NUM_BUFS;
-            buf_pos = 0;
-
-            /* Wait for the next buffer slot to become available */
-            while (!(g_hdrs[buf_idx].dwFlags & WHDR_DONE) &&
-                   g_running.load(std::memory_order_relaxed) &&
-                   g_seek_lba.load(std::memory_order_relaxed) == UINT32_MAX)
-            {
-                WaitForSingleObject(g_done_event, 50);
-            }
-        } else if (lba == UINT32_MAX) {
-            Sleep(10);
+        /* Read next sector */
+        long off = (long)((uint64_t)lba * RAW_SECTOR);
+        if (fseek(g_bin, off, SEEK_SET) != 0 ||
+            fread(raw, 1, RAW_SECTOR, g_bin) != RAW_SECTOR) {
+            lba = UINT32_MAX;
+            continue;
         }
+
+        uint8_t submode  = raw[XA_SUBHDR_OFF + 2];
+        uint8_t file_num = raw[XA_SUBHDR_OFF + 0];
+        uint8_t chan_num = raw[XA_SUBHDR_OFF + 1];
+
+        if (submode & SUBMODE_AUDIO) {
+            if (g_xa_file == 0xFF) {
+                g_xa_file    = file_num;
+                g_xa_channel = chan_num;
+                uint8_t coding = raw[XA_SUBHDR_OFF + 3];
+                printf("[XA] Locked to file=%u ch=%u codingInfo=0x%02X (%s %s %s)\n",
+                       file_num, chan_num, coding,
+                       (coding & 0x01) ? "stereo" : "mono",
+                       ((coding >> 2) & 0x03) == 0 ? "37800Hz" : "18900Hz",
+                       ((coding >> 4) & 0x03) == 0 ? "4-bit" : "8-bit");
+                fflush(stdout);
+            }
+
+            no_audio = 0;
+
+            if (file_num == g_xa_file && chan_num == g_xa_channel) {
+                xa_decode_sector(raw + XA_DATA_OFF, sect_pcm, prevL, prevR);
+                sect_pos = 0;
+                sect_rem = SAMPLES_PER_SECTOR;
+
+                if (g_wav_out && g_wav_samples < WAV_CAPTURE_PAIRS) {
+                    uint32_t space = WAV_CAPTURE_PAIRS - g_wav_samples;
+                    uint32_t n = ((uint32_t)SAMPLES_PER_SECTOR < space)
+                                 ? (uint32_t)SAMPLES_PER_SECTOR : space;
+                    fwrite(sect_pcm, sizeof(int16_t) * CHANNELS, n, g_wav_out);
+                    g_wav_samples += n;
+                }
+            }
+        } else {
+            if (++no_audio > 20) {
+                printf("[XA] No audio sectors near LBA %u — stopping\n", lba);
+                fflush(stdout);
+                lba = UINT32_MAX;
+                continue;
+            }
+        }
+
+        lba++;
     }
 
     printf("[XA] Audio thread exiting\n");
@@ -392,38 +373,13 @@ void xa_audio_init(const char* bin_path)
         printf("[XA] WARNING: could not open ./debug/xa_capture.wav for writing\n");
     }
 
-    /* Set up WinMM waveOut at OUTPUT_RATE (44100 Hz).
-     * We upsample from SAMPLE_RATE (37800 Hz) ourselves to avoid relying on
-     * Windows's internal resampler, which produces audible artifacts on the
-     * 37800→48000 Hz path. */
-    WAVEFORMATEX wf = {};
-    wf.wFormatTag      = WAVE_FORMAT_PCM;
-    wf.nChannels       = CHANNELS;
-    wf.nSamplesPerSec  = OUTPUT_RATE;
-    wf.wBitsPerSample  = 16;
-    wf.nBlockAlign     = CHANNELS * 2;
-    wf.nAvgBytesPerSec = OUTPUT_RATE * CHANNELS * 2;
-
-    g_done_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-
-    MMRESULT res = waveOutOpen(&g_wave, WAVE_MAPPER, &wf,
-                               (DWORD_PTR)g_done_event, 0, CALLBACK_EVENT);
-    if (res != MMSYSERR_NOERROR) {
-        fprintf(stderr, "[XA] waveOutOpen failed: %u\n", res);
-        g_wave = NULL;
-        return;
-    }
-
-    /* Mark all buffers as initially done (not queued) */
-    memset(g_hdrs, 0, sizeof(g_hdrs));
-    memset(g_pcm,  0, sizeof(g_pcm));
-    for (int i = 0; i < NUM_BUFS; i++)
-        g_hdrs[i].dwFlags = WHDR_DONE;
+    g_ring_write.store(0, std::memory_order_relaxed);
+    g_ring_read.store(0, std::memory_order_relaxed);
 
     g_running = true;
     g_thread  = std::thread(audio_thread);
 
-    printf("[XA] Audio ready (decode %d Hz → waveOut %d Hz)\n", SAMPLE_RATE, OUTPUT_RATE);
+    printf("[XA] Audio ready (decode %d Hz → ring buffer)\n", SAMPLE_RATE);
     fflush(stdout);
 }
 
@@ -438,7 +394,6 @@ void xa_audio_set_volume(float v)
 
 void xa_audio_seek(uint32_t lba)
 {
-    if (!g_wave) return;
     g_seek_lba.store(lba, std::memory_order_release);
 }
 
@@ -459,17 +414,10 @@ void xa_audio_shutdown(void)
                g_wav_samples, (float)g_wav_samples / (float)SAMPLE_RATE);
     }
 
-    if (g_wave) {
-        waveOutReset(g_wave);
-        for (int i = 0; i < NUM_BUFS; i++) {
-            if (g_hdrs[i].dwFlags & WHDR_PREPARED)
-                waveOutUnprepareHeader(g_wave, &g_hdrs[i], sizeof(WAVEHDR));
-        }
-        waveOutClose(g_wave);
-        g_wave = NULL;
+    if (g_bin) {
+        fclose(g_bin);
+        g_bin = nullptr;
     }
-    if (g_bin)        { fclose(g_bin);         g_bin        = nullptr; }
-    if (g_done_event) { CloseHandle(g_done_event); g_done_event = NULL; }
 }
 
 } /* extern "C" */

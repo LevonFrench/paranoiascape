@@ -1,3 +1,16 @@
+---
+title: "White Area Bug"
+category: concept
+sources: []
+compiled-from: conversation
+created: 2026-05-11
+updated: 2026-06-19
+tags: [psx, recomp, graphics, fmv]
+confidence: high
+summary: "Root cause analysis of the white area FMV background bug caused by FMV quads sampling incorrect sprite index data instead of decoded FMV frames."
+volatility: warm
+---
+
 # White Area Rendering Artifact — RESOLVED
 
 ## Summary
@@ -29,4 +42,4 @@ A 15-bit→8-bit CLUT quantizer was implemented in `fmv_player.cpp`:
 | Both uploaded at boot (f72) via CPUToVRAM(0,511,256,1) and (0,510,256,1) |
 
 ## Current Status
-The white area is a **secondary symptom**. The primary blocker is the [display_snapshot_ timing bug](./title-screen-snapshot-bug.md) that makes the title screen render as black. Once the snapshot bug is fixed, the quantizer can be re-enabled to replace white with actual FMV-derived background content.
+The white area is a **secondary symptom**. The primary blocker is the [[title-screen-snapshot-bug|display_snapshot_ timing bug]] ([display_snapshot_ timing bug](../concepts/title-screen-snapshot-bug.md)) that makes the title screen render as black. Once the snapshot bug is fixed, the quantizer can be re-enabled to replace white with actual FMV-derived background content.

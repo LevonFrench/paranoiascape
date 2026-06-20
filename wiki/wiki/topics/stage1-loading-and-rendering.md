@@ -1,3 +1,16 @@
+---
+title: "Stage1 Loading And Rendering"
+category: topic
+sources: []
+compiled-from: conversation
+created: 2026-05-08
+updated: 2026-06-19
+tags: [psx, recomp, load, rendering]
+confidence: high
+summary: "Details of the Stage 1 file loading manifest, LoadTask indexing bug fix, CD-sync bypass table, and initial rendering stall analysis."
+volatility: warm
+---
+
 # Stage 1 Loading & Rendering Pipeline
 
 Status as of 2026-05-08. Stage 1 assets load successfully into RAM and VRAM. The game loop runs but produces no GPU draw primitives.

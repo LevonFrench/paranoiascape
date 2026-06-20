@@ -15,11 +15,24 @@
 #include <exception>
 #include <iostream>
 
+extern "C" void psx_fatal_halt(const char* format, ...);
+
 static void psx_terminate_handler() {
     std::cerr << "!!! FATAL: std::terminate called !!!" << std::endl;
-    // We don't have a clean way to get a stack trace here without external libs,
-    // but at least we can log that it happened.
-    abort();
+    try {
+        if (std::current_exception()) {
+            std::rethrow_exception(std::current_exception());
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Exception message: " << e.what() << std::endl;
+        psx_fatal_halt("std::terminate called: %s", e.what());
+        return;
+    } catch (...) {
+        std::cerr << "Unknown exception type!" << std::endl;
+        psx_fatal_halt("std::terminate called (unknown exception)");
+        return;
+    }
+    psx_fatal_halt("std::terminate called");
 }
 
 /* Bridge globals */
@@ -50,6 +63,14 @@ extern "C" {
     void gpu_write_gp1(uint32_t word) { if (g_gpu) g_gpu->WriteGP1(word); }
     void gpu_abort_streaming() { if (g_gpu) g_gpu->AbortStreaming(); }
     static uint16_t keyboard_get_pad() {
+        // Frame-based automation sequence to boot into gameplay
+        if (g_ps1_frame >= 100 && g_ps1_frame <= 120) return 0x0008; // START (skip FMV)
+        if (g_ps1_frame >= 1000 && g_ps1_frame <= 1020) return 0x0008; // START (start menu)
+        if (g_ps1_frame >= 1140 && g_ps1_frame <= 1160) return 0x2000; // CIRCLE (Game Start)
+        if (g_ps1_frame >= 1280 && g_ps1_frame <= 1300) return 0x0040; // DOWN (select Stage Select / New Game)
+        if (g_ps1_frame >= 1420 && g_ps1_frame <= 1440) return 0x2000; // CIRCLE (confirm)
+        if (g_ps1_frame >= 1560 && g_ps1_frame <= 1580) return 0x4000; // CROSS (skip tutorial)
+
         int input_override = debug_server_get_input_override();
         if (input_override != -1) return (uint16_t)input_override;
 
@@ -118,6 +139,15 @@ extern "C" {
                 fflush(stdout);
                 s_last_log = g_ps1_frame;
             }
+            // Active display buffer swap fallback - enabled for gameplay (OSM == 0) in low-res mode
+            if (g_renderer && g_ram[0x13DC60] == 0 && g_renderer->GetDisplayHeight() <= 240) {
+                PS1::DrawingArea da = g_renderer->GetDrawingArea();
+                int current_disp_y = g_renderer->GetDisplayAreaY();
+                int target_disp_y = (da.y1 >= 240) ? 0 : 240;
+                if (current_disp_y != target_disp_y) {
+                    g_renderer->SetDisplayArea(g_renderer->GetDisplayAreaX(), target_disp_y);
+                }
+            }
             g_renderer->Present(); 
             g_ps1_frame++;
             extern void psx_set_pad1(uint16_t buttons);
@@ -155,7 +185,7 @@ extern "C" {
                 s_f11_was_pressed = f11_now;
 
                 /* Auto-screenshot at milestones */
-                static uint32_t s_auto_milestones[] = {10, 30, 50, 70, 100, 500, 855, 858, 860, 861, 862, 863, 864, 865, 866, 867, 868, 869, 870, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 3000, 5000, 10000, 13000, 13100, 13500, 14000, 15000, 18000, 20000, 25000};
+                static uint32_t s_auto_milestones[] = {10, 30, 50, 70, 100, 500, 855, 858, 860, 861, 862, 863, 864, 865, 866, 867, 868, 869, 870, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2910, 2920, 2930, 3000, 3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200, 4300, 4400, 4500, 4600, 4700, 4800, 4900, 5000, 10000, 10450, 13000, 13100, 13500, 14000, 15000, 18000, 20000, 25000};
                 static int s_auto_idx = 0;
                 int n_milestones = (int)(sizeof(s_auto_milestones) / sizeof(s_auto_milestones[0]));
                 if (s_auto_idx < n_milestones && g_ps1_frame >= s_auto_milestones[s_auto_idx]) {
@@ -231,6 +261,8 @@ extern "C" void psxrecomp_runner_run(int argc, char** argv) {
             debug_port = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--debug")) {
             g_debug_mode = 1;
+        } else if (!strcmp(argv[i], "--turbo")) {
+            g_turbo = 1;
         } else if (!exe_path) {
             exe_path = argv[i];
         } else if (!cue_path) {

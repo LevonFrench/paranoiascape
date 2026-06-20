@@ -94,6 +94,7 @@ public:
 
     // FMV compositing — uploads decoded AVI frame for background blit
     void UploadFMVFrame(int w, int h, const uint16_t* data);
+    void ClearDisplaySnapshot();
 
     // Debug server state accessors
     int GetDisplayAreaX() const { return display_area_x_; }
@@ -211,6 +212,7 @@ private:
     int v_display_range_y2_ = 0;   // Vertical end (video scanline)
     int h_display_range_x1_ = 0;   // Horizontal start (dot clocks)
     int h_display_range_x2_ = 0;   // Horizontal end (dot clocks)
+    bool in_present_ = false;
 };
 
 } // namespace PS1

@@ -27,8 +27,14 @@ int fmv_player_tick(void);
 /* True if a FMV seek has been issued and FMV hasn't finished yet. */
 int fmv_player_is_active(void);
 
+/* Get the starting LBA of the current active FMV sequence. */
+uint32_t fmv_player_get_start_lba(void);
+
 /* True if FMV is actively displaying frames (alias for is_active). */
 int fmv_player_is_displaying(void);
+
+/* True if this FMV sequence wants the game graphics overlay (Pass 2) rendered. */
+int fmv_player_wants_overlay(void);
 
 /* Re-upload the current FMV frame to VRAM (640,0).  Call right before
  * rendering to ensure FMV data isn't overwritten by game sprite uploads. */

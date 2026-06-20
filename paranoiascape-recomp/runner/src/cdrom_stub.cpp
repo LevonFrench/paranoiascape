@@ -92,9 +92,12 @@ void psx_cdrom_populate_file_table(uint8_t* g_ram, uint32_t table_addr) {
         if (psx_cdrom_search_file(cn, &pos, &size)) {
             memcpy(&g_ram[current_addr + 4], &pos, 4);
             memcpy(&g_ram[current_addr + 8], &size, 4);
+            printf("[CdInit] Populated file table entry: '%s' (LBA: %u, Size: %u bytes)\n", cn, pos, size);
+            fflush(stdout);
             populated_count++;
         } else {
             printf("[CdInit] Warning: Could not find file '%s' for table entry\n", cn);
+            fflush(stdout);
         }
         
         current_addr += 12;

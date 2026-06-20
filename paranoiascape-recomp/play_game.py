@@ -15,7 +15,12 @@ def send_recv(sock, cmd_dict):
 
 def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('127.0.0.1', 4370))
+    for _ in range(10):
+        try:
+            s.connect(('127.0.0.1', 4370))
+            break
+        except Exception:
+            time.sleep(1)
     
     print("Waiting 5s for boot...")
     time.sleep(5)

@@ -104,3 +104,9 @@ test_*.py
 run_recomp.bat
 run_emulator.bat
 test_recomp.bat
+
+# External tools and third-party files not created by us
+RecompOne/
+psxrecomp/
+paranoiascape-recomp/runner/src/miniaudio.h
+llm-wiki/

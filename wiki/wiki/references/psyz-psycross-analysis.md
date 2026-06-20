@@ -1,3 +1,16 @@
+---
+title: "Psyz Psycross Analysis"
+category: reference
+sources: []
+compiled-from: conversation
+created: 2026-05-15
+updated: 2026-06-19
+tags: [psx, recomp, sdk, library]
+confidence: high
+summary: "Analysis of the PSY-Z SDK samples, matching decompilations, and PsyCross library components to guide porting in paranoiascape-recomp."
+volatility: warm
+---
+
 # PSY-Z vs PsyCross: What We Can Actually Use
 
 ## Architecture Comparison

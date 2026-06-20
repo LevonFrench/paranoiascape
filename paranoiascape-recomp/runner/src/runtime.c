@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <signal.h>
+#include <stdarg.h>
 
 #include "diag_log.h"
 #include "game_extras.h"
@@ -49,6 +50,9 @@ uint32_t g_vm_ops_this_frame = 0;
 
 /* Current CDROM seek position (LBA), set by CdlSeekL intercept */
 static uint32_t g_cdrom_lba = 0;
+
+/* Tracks whether the Title Screen has been reached at least once to disable forced FMV skips */
+static int g_title_reached = 0;
 
 /* Dispatch miss tracking */
 #define MAX_DISPATCH_MISS_UNIQUE 256
@@ -608,19 +612,11 @@ static LONG WINAPI crash_exception_handler(EXCEPTION_POINTERS* ep) {
                     "CRASH_REGS,pc=0x%08X,v0=0x%08X,v1=0x%08X,a0=0x%08X,a1=0x%08X,a2=0x%08X,a3=0x%08X\n",
                     g_diag_cpu->pc, g_diag_cpu->v0, g_diag_cpu->v1,
                     g_diag_cpu->a0, g_diag_cpu->a1, g_diag_cpu->a2, g_diag_cpu->a3);
-            fprintf(g_mmio_trace_file,
-                    "CRASH_REGS,s0=0x%08X,s1=0x%08X,s2=0x%08X,s3=0x%08X,s4=0x%08X,s5=0x%08X,s6=0x%08X,s7=0x%08X\n",
-                    g_diag_cpu->s0, g_diag_cpu->s1, g_diag_cpu->s2, g_diag_cpu->s3,
-                    g_diag_cpu->s4, g_diag_cpu->s5, g_diag_cpu->s6, g_diag_cpu->s7);
-            fprintf(g_mmio_trace_file,
-                    "CRASH_REGS,t0=0x%08X,t1=0x%08X,t2=0x%08X,t3=0x%08X,gp=0x%08X,fp=0x%08X,hi=0x%08X,lo=0x%08X\n",
-                    g_diag_cpu->t0, g_diag_cpu->t1, g_diag_cpu->t2, g_diag_cpu->t3,
-                    g_diag_cpu->gp, g_diag_cpu->fp, g_diag_cpu->hi, g_diag_cpu->lo);
         }
         fclose(g_mmio_trace_file);
         g_mmio_trace_file = NULL;
     }
-    _exit(1);
+    psx_fatal_halt("Crash handler triggered: Exception code=0x%08lX", code);
     return EXCEPTION_EXECUTE_HANDLER; /* unreachable */
 }
 #endif
@@ -632,6 +628,51 @@ void psx_install_crash_handler(void) {
     signal(SIGSEGV, crash_signal_handler);
     signal(SIGABRT, crash_signal_handler);
 #endif
+}
+
+void psx_fatal_halt(const char* format, ...) {
+    printf("\n!!! FATAL HALT !!!\n");
+    va_list args;
+    va_start(args, format);
+    vprintf(format, args);
+    va_end(args);
+    printf("\n");
+    fflush(stdout);
+
+    /* Write details to psx_crash.txt */
+    FILE* f = fopen("psx_crash.txt", "w");
+    if (f) {
+        fprintf(f, "!!! FATAL HALT !!!\n");
+        va_start(args, format);
+        vfprintf(f, format, args);
+        va_end(args);
+        fprintf(f, "\n");
+        if (g_diag_cpu) {
+            fprintf(f, "MIPS State:\n");
+            fprintf(f, "pc=0x%08X ra=0x%08X sp=0x%08X\n", g_diag_cpu->pc, g_diag_cpu->ra, g_diag_cpu->sp);
+            fprintf(f, "v0=0x%08X v1=0x%08X a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X\n",
+                    g_diag_cpu->v0, g_diag_cpu->v1, g_diag_cpu->a0, g_diag_cpu->a1, g_diag_cpu->a2, g_diag_cpu->a3);
+            fprintf(f, "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X s5=0x%08X s6=0x%08X s7=0x%08X\n",
+                    g_diag_cpu->s0, g_diag_cpu->s1, g_diag_cpu->s2, g_diag_cpu->s3, g_diag_cpu->s4, g_diag_cpu->s5, g_diag_cpu->s6, g_diag_cpu->s7);
+            fprintf(f, "t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X gp=0x%08X fp=0x%08X hi=0x%08X lo=0x%08X\n",
+                    g_diag_cpu->t0, g_diag_cpu->t1, g_diag_cpu->t2, g_diag_cpu->t3, g_diag_cpu->gp, g_diag_cpu->fp, g_diag_cpu->hi, g_diag_cpu->lo);
+        }
+        fclose(f);
+    }
+
+    /* Wait loop, polling debug server so TCP socket stays alive for remote inspection */
+    extern void debug_server_poll(void);
+    while (1) {
+        debug_server_poll();
+#ifdef _WIN32
+        Sleep(10);
+#else
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 10000000;
+        nanosleep(&ts, NULL);
+#endif
+    }
 }
 
 static uint16_t get_vblank_count(void) {
@@ -728,10 +769,10 @@ static int s_display_needs_restart = 0;
  * This flag blocks any re-entrant call. */
 static int g_frame_flip_running = 0;
 
-/* Dispatch to compiled game functions — defined in tomba_dispatch.c */
+/* Dispatch to compiled game functions — defined in SLPS_013.75_dispatch.c */
 extern int psx_dispatch_compiled(CPUState* cpu, uint32_t addr);
 
-/* Display thread entry function — defined in tomba_full.c */
+/* Display thread entry function — defined in SLPS_013.75_full.c */
 extern void func_800191E0(CPUState* cpu);
 
 /* Gameplay state handler — needs callee-save wrapper (see 0x8001a954 case) */
@@ -777,7 +818,7 @@ static VOID WINAPI fiber_secondary_func(PVOID param) {
  * Returns NULL for I/O ports (caller handles as stub). */
 static uint8_t* addr_ptr(uint32_t addr) {
     uint32_t phys = addr & 0x1FFFFFFF;  /* strip KSEG bits */
-    if (phys < 0x200000)                 return &g_ram[phys];
+    if (phys < 0x00800000)               return &g_ram[phys & 0x1FFFFF];
     if (phys >= 0x1F800000 && phys < 0x1F800400) return &g_scratch[phys & 0x3FF];
     return NULL;  /* I/O or unmapped */
 }
@@ -786,18 +827,7 @@ static uint8_t* addr_ptr(uint32_t addr) {
  * Memory access helpers
  * --------------------------------------------------------------------------- */
 static uint32_t read_word(uint32_t addr) {
-    uint32_t phys = addr & 0x1FFFFFFFu;
-    if (phys == 0x0013E5ECu || phys == 0x0013E5EEu) {
-        static int s_w = 0;
-        if (s_w++ % 60 == 0) {
-            printf("[WATCH-13E] read_word(0x%08X) ra=0x%08X\n", addr, g_diag_cpu ? g_diag_cpu->ra : 0);
-            fflush(stdout);
-        }
-    }
-    static uint64_t s_rw_count = 0;
-    if ((++s_rw_count % 1000000) == 0) {
-        printf("[SPIN-DIAG-W] addr=0x%08X ra=0x%08X\n", addr, g_diag_cpu ? g_diag_cpu->ra : 0); fflush(stdout);
-    }
+
 
     watchdog_check(addr, 32);
     /* Heartbeat + spin detector */
@@ -821,9 +851,11 @@ static uint32_t read_word(uint32_t addr) {
                 uint8_t* pp = addr_ptr(addr);
                 uint32_t val = 0;
                 if (pp) memcpy(&val, pp, 4);
-                printf("[SPIN] read_word(0x%08X) called 1M times, val=0x%08X  ra=0x%08X sp=0x%08X total=%llu\n",
-                       addr, val, ra, sp, (unsigned long long)s_rw_count);
-                fflush(stdout);
+                if (DIAG_ENABLED()) {
+                    printf("[SPIN] read_word(0x%08X) called 1M times, val=0x%08X  ra=0x%08X sp=0x%08X total=%llu\n",
+                           addr, val, ra, sp, (unsigned long long)s_rw_count);
+                    fflush(stdout);
+                }
                 if (g_mmio_trace_enabled && g_mmio_trace_file) {
                     fprintf(g_mmio_trace_file, "SPIN,0x%08X,0x%08X,32,0x%08X,0x%08X\n",
                             addr, val, ra, sp);
@@ -877,27 +909,7 @@ static uint32_t s_dma2_bcr  = 0;   /* 0x1F8010A4: block count / size   */
 
 static void write_word(uint32_t addr, uint32_t value) {
     uint32_t phys = addr & 0x1FFFFFFFu;
-    if (phys == 0x0013E5ECu) {
-        printf("[PAD-WRITE] 13E5EC word = %08X ra=%08X\n", value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
-    }
-    if (phys == 0x000A5450u) {
-        printf("[WATCH-A5450] write_word(0x%08X, 0x%08X) ra=0x%08X\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
-    }
-    if (phys == 0x00008580u) {
-        printf("[WATCH-8580] write_word ra=0x%08X val=0x%08X\n", g_diag_cpu ? g_diag_cpu->ra : 0, value);
-        fflush(stdout);
-    }
-    if (phys == 0x000A5458u || phys == 0x000A545Au) {
-        printf("[WATCH-A545A] write_word(0x%08X, 0x%08X) ra=0x%08X\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
-    }
     uint8_t* p = addr_ptr(addr);
-    if (phys >= 0x001EE560u && phys < 0x001EE580u) {
-        printf("[WATCH-TMD] write_word(0x%08X, 0x%08X) ra=0x%08X f%u\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0, g_ps1_frame);
-        fflush(stdout);
-    }
 
     if (p) {
         /* FUN_8003ef50 (LZ decompressor) start: first thing it writes is scratchpad 0x70 (decompressed size).
@@ -995,6 +1007,15 @@ static void write_word(uint32_t addr, uint32_t value) {
 
     /* GPU GP0 data port — direct SW to 0x1F801810 */
     if (phys == 0x1F801810u) {
+        static uint32_t s_gp0_diag_count = 0;
+        if (g_ps1_frame == 10000 && s_gp0_diag_count < 100) {
+            printf("[GP0-DIAG] #%u: 0x%08X (X=%d, Y=%d)\n", 
+                   s_gp0_diag_count, value, (int16_t)(value & 0xFFFF), (int16_t)(value >> 16));
+            s_gp0_diag_count++;
+            if (s_gp0_diag_count == 100) {
+                fflush(stdout);
+            }
+        }
         gpu_submit_word(value);
         return;
     }
@@ -1010,10 +1031,7 @@ static void write_word(uint32_t addr, uint32_t value) {
     if (phys == 0x1F8010A0u) { s_dma2_madr = value; return; }  /* MADR */
     if (phys == 0x1F8010A4u) { s_dma2_bcr  = value; return; }  /* BCR  */
 
-    if (phys >= 0x000A5560u && phys <= 0x000A556Cu) {
-        printf("[WATCH-D2-TABLE] write_word(0x%08X, 0x%08X) ra=0x%08X\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
-    }
+
 
     /* DMA channel 4 (SPU) register shadow */
     static uint32_t s_dma4_madr = 0;
@@ -1027,6 +1045,11 @@ static void write_word(uint32_t addr, uint32_t value) {
             uint32_t block_words = s_dma4_bcr & 0xFFFFu;
             uint32_t block_count = (s_dma4_bcr >> 16) & 0xFFFFu;
             uint32_t total_bytes = block_words * block_count * 4u;
+            if (total_bytes > 2u * 1024u * 1024u) {
+                printf("[DMA4-SPU] Warning: SPU DMA transfer size %u bytes exceeds 2MB limit! Clamping to 2MB.\n", total_bytes);
+                fflush(stdout);
+                total_bytes = 2u * 1024u * 1024u;
+            }
             /* [DMA4-SPU] printf("[DMA4-SPU] CHCR=0x%08X madr=0x%08X bcr=0x%08X → %u bytes\n",
                value, s_dma4_madr, s_dma4_bcr, total_bytes); */
             spu_dma_write(s_dma4_madr, total_bytes, g_ram, sizeof(g_ram));
@@ -1036,13 +1059,6 @@ static void write_word(uint32_t addr, uint32_t value) {
 
     /* SPU hardware registers (32-bit writes e.g. ADSR) */
 
-    if (phys == 0x0013E5ECu || phys == 0x0013E5EEu) {
-        static int s_w = 0;
-        if (s_w++ % 60 == 0) {
-            printf("[WATCH-13E] read_half(0x%08X) ra=0x%08X\n", addr, g_diag_cpu ? g_diag_cpu->ra : 0);
-            fflush(stdout);
-        }
-    }
     if (phys >= 0x1F801C00u && phys < 0x1F801E00u) {
         spu_write_word(phys, value);
         return;
@@ -1054,7 +1070,7 @@ static void write_word(uint32_t addr, uint32_t value) {
         uint32_t dir  =  value       & 1u;
         static uint32_t s_dma2_calls = 0;
         /* [DMA2-CHCR] */
-        if (value & 0x01000000u) {
+        if (DIAG_ENABLED() && (value & 0x01000000u)) {
             printf("[DMA2-CHCR] #%u: value=0x%08X sync=%u dir=%u madr=0x%08X bcr=0x%08X\n",
                    s_dma2_calls + 1, value, sync, dir, s_dma2_madr, s_dma2_bcr);
             fflush(stdout);
@@ -1064,9 +1080,13 @@ static void write_word(uint32_t addr, uint32_t value) {
             uint32_t block_size  = s_dma2_bcr & 0xFFFFu;
             uint32_t block_count = (s_dma2_bcr >> 16) & 0xFFFFu;
             uint32_t total = block_size * block_count;
+            if (total > 524288u) {  /* 2MB limit (524288 words) */
+                printf("[DMA2-GPU] Warning: CPU->GPU DMA transfer size %u words exceeds 2MB limit! Clamping to 2MB.\n", total);
+                fflush(stdout);
+                total = 524288u;
+            }
             uint32_t base  = s_dma2_madr & 0x1FFFFFu;  /* physical, word-aligned */
             ++s_dma2_calls;
-            if (total > 1024u * 512u) total = 1024u * 512u;  /* sanity cap */
             for (uint32_t i = 0; i < total; i++) {
                 uint32_t off = (base + i * 4u) & 0x1FFFFFu;
                 if (off + 4u <= sizeof(g_ram)) {
@@ -1093,22 +1113,22 @@ static void write_word(uint32_t addr, uint32_t value) {
                 uint8_t* ph = addr_ptr(ptr);
                 if (!ph) break;
                 uint32_t hdr; memcpy(&hdr, ph, 4);
-                if (ll_limit == 0) {
-                    printf("[DMA2-LL] madr=0x%08X hdr=0x%08X\n", s_dma2_madr, hdr);
-                    fflush(stdout);
+                if (DIAG_ENABLED() && (ll_limit == 0)) {
+                    // printf("[DMA2-LL] madr=0x%08X hdr=0x%08X\n", s_dma2_madr, hdr);
+                    // fflush(stdout);
                 }
                 uint8_t cnt = (uint8_t)(hdr >> 24);
                 for (uint8_t wi = 0; wi < cnt; wi++) {
                     uint8_t* pw = addr_ptr(ptr + 4u + wi * 4u);
                     if (pw) { 
-                        uint32_t w; memcpy(&w, pw, 4); 
+                      uint32_t w; memcpy(&w, pw, 4); 
                         if (ll_limit == 0) {
-                            printf("  [DMA2-LL] word[%d] = 0x%08X\n", wi, w);
+                            // printf("  [DMA2-LL] word[%d] = 0x%08X\n", wi, w);
                         }
                         gpu_submit_word(w); 
                     }
                 }
-                gpu_abort_streaming();  /* Abort CPUToVRAM streaming after each element */
+                // gpu_abort_streaming();  /* Abort CPUToVRAM streaming after each element */
                 uint32_t nxt = hdr & 0xFFFFFFu;
                 if (nxt == 0xFFFFFFu || nxt == 0u) break;
                 ptr = nxt | 0x80000000u;
@@ -1154,9 +1174,13 @@ static void write_word(uint32_t addr, uint32_t value) {
             uint32_t block_size  = s_dma2_bcr & 0xFFFFu;
             uint32_t block_count = (s_dma2_bcr >> 16) & 0xFFFFu;
             uint32_t total = block_size * block_count;
+            if (total > 524288u) {  /* 2MB limit (524288 words) */
+                printf("[DMA2-GPU] Warning: GPU->RAM DMA transfer size %u words exceeds 2MB limit! Clamping to 2MB.\n", total);
+                fflush(stdout);
+                total = 524288u;
+            }
             uint32_t base  = s_dma2_madr & 0x1FFFFFu;
             ++s_dma2_calls;
-            if (total > 1024u * 512u) total = 1024u * 512u;  /* sanity cap */
             for (uint32_t i = 0; i < total; i++) {
                 uint32_t off = (base + i * 4u) & 0x1FFFFFu;
                 if (off + 4u <= sizeof(g_ram)) {
@@ -1176,11 +1200,19 @@ static void write_word(uint32_t addr, uint32_t value) {
 }
 
 static uint32_t s_sio_state = 0;
+static void sio_advance_state(uint8_t byte_val) {
+    if (byte_val == 0x01) s_sio_state = 1;
+    else if (byte_val == 0x42) s_sio_state = 2;
+    else if (s_sio_state == 2) s_sio_state = 3;
+    else if (s_sio_state == 3) s_sio_state = 4;
+    else if (s_sio_state == 4) s_sio_state = 5;
+    else s_sio_state = 0;
+}
 extern uint16_t g_pad1_state;
 
 static uint16_t read_half(uint32_t addr) {
     static uint64_t s_rh_count = 0;
-    if ((++s_rh_count % 100000) == 0) {
+    if (DIAG_ENABLED() && ((++s_rh_count % 100000) == 0)) {
         printf("[SPIN-DIAG-H] addr=0x%08X ra=0x%08X\n", addr, g_diag_cpu ? g_diag_cpu->ra : 0); fflush(stdout);
     }
 
@@ -1196,9 +1228,11 @@ static uint16_t read_half(uint32_t addr) {
                 uint8_t* pp = addr_ptr(addr);
                 uint16_t val = 0;
                 if (pp) memcpy(&val, pp, 2);
-                printf("[SPIN-H] read_half(0x%08X) called 1M times, val=0x%04X  ra=0x%08X\n",
-                       addr, (uint32_t)val, ra);
-                fflush(stdout);
+                if (DIAG_ENABLED()) {
+                    printf("[SPIN-H] read_half(0x%08X) called 1M times, val=0x%04X  ra=0x%08X\n",
+                           addr, (uint32_t)val, ra);
+                    fflush(stdout);
+                }
                 if (g_mmio_trace_enabled && g_mmio_trace_file) {
                     fprintf(g_mmio_trace_file, "SPIN,0x%08X,0x%04X,16,0x%08X,0x%08X\n",
                             addr, (uint32_t)val, ra, sp);
@@ -1213,15 +1247,8 @@ static uint16_t read_half(uint32_t addr) {
         uint16_t val = 0;
         if (phys >= 0x1F801C00u && phys < 0x1F801E00u)
             val = spu_read_half(addr);
-        /* SIO0 registers — log first access to confirm game uses SIO0 for MC */
+        /* SIO0 registers */
         else if (phys >= 0x1F801040u && phys <= 0x1F80105Eu) {
-            static uint32_t s_sio_log_cnt = 0;
-            if (s_sio_log_cnt < 200) {
-                printf("[SIO0-R] half phys=0x%08X f%u ra=0x%08X cnt=%u\n",
-                       phys, g_ps1_frame,
-                       g_diag_cpu ? g_diag_cpu->ra : 0, s_sio_log_cnt);
-                if (++s_sio_log_cnt == 200) printf("[SIO0-R] (further SIO0 reads suppressed)\n");
-            }
             if (phys == 0x1F801044u) {
                 /* SIO STAT: Bit 0 (TX NOT FULL), Bit 1 (RX NOT EMPTY), Bit 2 (TX IDLE).
                  * The game loops on (STAT & 2) == 0 waiting for RX. */
@@ -1278,10 +1305,6 @@ static uint16_t read_half(uint32_t addr) {
 static void write_half(uint32_t addr, uint16_t value) {
     uint8_t* p = addr_ptr(addr);
     uint32_t phys = addr & 0x1FFFFFFFu;
-    if (phys >= 0x001EE560u && phys < 0x001EE580u) {
-        printf("[WATCH-TMD] write_half(0x%08X, 0x%04X) ra=0x%08X f%u\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0, g_ps1_frame);
-        fflush(stdout);
-    }
     if (p) {
         /* [KERN-WH] kernel-area half-word write watchpoint — result: none fired.
          * Re-enable: remove comment-out below.
@@ -1314,20 +1337,11 @@ static void write_half(uint32_t addr, uint16_t value) {
         mmio_trace("W", addr, value, 16);
         /* SPU hardware registers 0x1F801C00-0x1F801DFF */
         uint32_t phys = addr & 0x1FFFFFFFu;
-        if (phys == 0x1F801070u) { printf("[VSYNC] ra=0x%08X\n", g_diag_cpu ? g_diag_cpu->ra : 0); fflush(stdout); }
         if (phys >= 0x1F801C00u && phys < 0x1F801E00u)
             spu_write_half(addr, value);
-        /* SIO0 TX register — advance SPI state machine on halfword writes.
-         * The game uses SH (store-halfword) to write 0x0001/0x0042 to SIO TX,
-         * but the state machine was only wired to write_byte. */
+        /* SIO0 TX register — advance SPI state machine on halfword writes. */
         if (phys == 0x1F801040u) {
-            uint8_t byte_val = value & 0xFF;
-            if (byte_val == 0x01) s_sio_state = 1;
-            else if (byte_val == 0x42) s_sio_state = 2;
-            else if (s_sio_state == 2) s_sio_state = 3;
-            else if (s_sio_state == 3) s_sio_state = 4;
-            else if (s_sio_state == 4) s_sio_state = 5;
-            else s_sio_state = 0;
+            sio_advance_state(value & 0xFF);
         }
     }
 }
@@ -1335,18 +1349,8 @@ static void write_half(uint32_t addr, uint16_t value) {
 /* s_sio_state and g_pad1_state moved above read_half/write_half */
 
 static uint8_t read_byte(uint32_t addr) {
-    static uint64_t s_rb_count = 0;
-    if ((++s_rb_count % 100000) == 0) {
-        printf("[SPIN-DIAG-B] addr=0x%08X ra=0x%08X\n", addr, g_diag_cpu ? g_diag_cpu->ra : 0); fflush(stdout);
-    }
-
     uint32_t phys = addr & 0x1FFFFFFFu;
     if (phys == 0x1F801040u) {
-        static int sio_read_cnt = 0;
-        if (sio_read_cnt++ % 60 == 0) {
-            printf("[SIO] 1F801040 read!\n");
-            fflush(stdout);
-        }
         uint16_t pad = ~g_pad1_state;
         extern int debug_server_get_input_override(void);
         int override = debug_server_get_input_override();
@@ -1362,6 +1366,12 @@ static uint8_t read_byte(uint32_t addr) {
         if (s_sio_state == 5) return (uint8_t)((pad >> 8) & 0xFF);
         return 0xFF;
     }
+    if (phys == 0x000B6798u) {
+        /* Bypass: func_80082A74 writes 0 to 0x800B6798. If it reads as 0,
+         * func_80082A74 bypasses func_80050DA4 (which executes the menu manager).
+         * Forcing it to 1 is required to keep menu manager running. */
+        return 1;
+    }
     uint8_t* p = addr_ptr(addr);
     if (!p) { mmio_trace("R", addr, 0, 8); return 0; }
     /* [E1C-RB] entity[0x1C] read watchpoint — re-enable with LOG_ON_CHANGE(*p, "E1C-RB", ...) */
@@ -1369,28 +1379,7 @@ static uint8_t read_byte(uint32_t addr) {
     return *p;
 }
 static void write_byte(uint32_t addr, uint8_t value) {
-    uint32_t phys = addr & 0x1FFFFFFFu;
-    if (phys == 0x000A545Au) {
-        printf("[WATCH-A545A] write_byte(0x%08X, 0x%02X) ra=0x%08X\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
-    }
-    if (phys == 0x0013E5ECu) {
-        printf("[PAD-WRITE] 13E5EC byte = %02X ra=%08X\n", value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
-    }
-    if (phys == 0x1F801040u) {
-        if (value == 0x01) s_sio_state = 1;
-        else if (value == 0x42) s_sio_state = 2;
-        else if (s_sio_state == 2) s_sio_state = 3;
-        else if (s_sio_state == 3) s_sio_state = 4;
-        else if (s_sio_state == 4) s_sio_state = 5;
-        else s_sio_state = 0;
-    }
     uint8_t* p = addr_ptr(addr);
-    if (phys >= 0x001EE560u && phys < 0x001EE580u) {
-        printf("[WATCH-TMD] write_byte(0x%08X, 0x%02X) ra=0x%08X f%u\n", addr, value, g_diag_cpu ? g_diag_cpu->ra : 0, g_ps1_frame);
-        fflush(stdout);
-    }
     if (p) {
         /* [KERN-WB] kernel-area byte write watchpoint — result: none fired.
          * Re-enable: remove comment-out below.
@@ -1405,29 +1394,10 @@ static void write_byte(uint32_t addr, uint8_t value) {
         *p = value; return;
     }
     mmio_trace("W", addr, value, 8);
-    /* SIO0 TX register write — log to see if game uses SIO0 for MC */
+    /* SIO0 TX register write */
     uint32_t phys8 = addr & 0x1FFFFFFFu;
-    if (phys8 >= 0x1F801040u && phys8 <= 0x1F80105Eu) {
-        static uint32_t s_sio_w_cnt = 0;
-        if (s_sio_w_cnt < 200) {
-            printf("[SIO0-W] half phys=0x%08X val=0x%04X f%u ra=0x%08X cnt=%u\n",
-                   phys8, (unsigned)value, g_ps1_frame,
-                   g_diag_cpu ? g_diag_cpu->ra : 0, s_sio_w_cnt);
-            if (++s_sio_w_cnt == 200) printf("[SIO0-W] (further SIO0 writes suppressed)\n");
-        }
-        if (phys8 == 0x1F801040u) {
-            uint8_t byte_val = value & 0xFF;
-            if (byte_val == 0x01) s_sio_state = 1;
-            else if (byte_val == 0x42) s_sio_state = 2;
-            else if (s_sio_state == 2) s_sio_state = 3;
-            else if (s_sio_state == 3) s_sio_state = 4;
-            else if (s_sio_state == 4) s_sio_state = 5;
-            else s_sio_state = 0;
-        }
-    }
-    if (phys8 == 0x0013E5ECu) {
-        printf("[PAD-WRITE] 13E5EC half = %04X ra=%08X\n", value, g_diag_cpu ? g_diag_cpu->ra : 0);
-        fflush(stdout);
+    if (phys8 == 0x1F801040u) {
+        sio_advance_state(value);
     }
 }
 static uint32_t do_lwl(uint32_t addr, uint32_t rt) {
@@ -1704,6 +1674,10 @@ static int mips_exec_one(CPUState* cpu, uint32_t* R[32],
 }
 
 void mips_interpret(CPUState* cpu, uint32_t start_pc) {
+    extern int psx_override_dispatch(CPUState* cpu, uint32_t addr);
+    if (psx_override_dispatch(cpu, start_pc)) {
+        return;
+    }
     /* Register pointer array — builds once per call depth */
     uint32_t zero_sink = 0;
     uint32_t* R[32];
@@ -1716,30 +1690,6 @@ void mips_interpret(CPUState* cpu, uint32_t start_pc) {
     R[20] = &cpu->s4;    R[21] = &cpu->s5;  R[22] = &cpu->s6;  R[23] = &cpu->s7;
     R[24] = &cpu->t8;    R[25] = &cpu->t9;  R[26] = &cpu->k0;  R[27] = &cpu->k1;
     R[28] = &cpu->gp;    R[29] = &cpu->sp;  R[30] = &cpu->fp;  R[31] = &cpu->ra;
-
-    static int s_log = 0; ++s_log;
-    /* [INTERP] enter — first 8: printf("[INTERP] enter 0x%08X ra=0x%08X\n", start_pc, cpu->ra); */
-
-    /* Trace calls to 0x800022C4 (kernel RAM function called from Tomba tick) */
-    /* [0x22C4] kernel RAM function trace — re-enable when debugging tick dispatch:
-    if (start_pc == 0x800022C4u) {
-        static uint32_t s_22c4 = 0;
-        if (++s_22c4 <= 5) {
-            uint32_t instr0 = cpu->read_word(0x800022C4u);
-            uint32_t instr1 = cpu->read_word(0x800022C8u);
-            printf("[0x22C4] #%u f%u first_instr=0x%08X second=0x%08X ra=0x%08X a0=0x%08X\n",
-                   s_22c4, g_ps1_frame, instr0, instr1, cpu->ra, cpu->a0);
-            fflush(stdout);
-        }
-    } */
-
-    /* Tomba entity tick (type 0x18) — trace first 20 calls + every 100 + attack window */
-    if (start_pc == 0x801139DCu) {
-        static uint32_t s_tomba_tick = 0;
-        ++s_tomba_tick;
-        int in_atk_window = (g_ps1_frame < g_attack_trace_end_frame);
-        /* [TOMBA-TICK] first 20 + every 100 + attack window — re-enable when investigating Tomba entity */
-    }
 
     uint32_t pc = start_pc;
     int guard;
@@ -1880,7 +1830,7 @@ void mips_interpret(CPUState* cpu, uint32_t start_pc) {
  * See runtime.log for rationale on each implemented function.
  * --------------------------------------------------------------------------- */
 
-/* Dispatch to compiled game functions (generated in tomba_dispatch.c).
+/* Dispatch to compiled game functions (generated in SLPS_013.75_dispatch.c).
  * Returns 1 if the address was a known compiled function, 0 otherwise. */
 extern int psx_dispatch_compiled(CPUState* cpu, uint32_t addr);
 
@@ -2096,7 +2046,7 @@ void call_by_address(CPUState* cpu, uint32_t addr) {
                 if (cpu->a0) {
                     const char* s = (const char*)&g_ram[cpu->a0 & 0x1FFFFFFF];
                     if (strstr(s, "non supported code") != NULL) {
-                        printf("[BIOS printf] non supported code: a1=0x%08X a2=0x%08X ra=0x%08X\n", cpu->a1, cpu->a2, cpu->ra);
+                        printf("[BIOS printf] non supported code (fmt='%s'): a1=0x%08X a2=0x%08X ra=0x%08X\n", s, cpu->a1, cpu->a2, cpu->ra);
                     } else if (strstr(s, "GPU CODE") != NULL) {
                         static uint32_t s_gpu_code_warns = 0;
                         if (s_gpu_code_warns++ < 20) {
@@ -3035,7 +2985,6 @@ void call_by_address(CPUState* cpu, uint32_t addr) {
      * the drain loop exits immediately.  Return v0=0 (no error). */
     if (addr == 0x80061350u) {
         static int s_61350 = 0;
-        if (++s_61350 <= 3) { printf("[GPU-DRAIN] 0x80061350 intercepted #%d\n", s_61350); fflush(stdout); }
         cpu->v0 = 0;
         return;
     }
@@ -3048,7 +2997,7 @@ void call_by_address(CPUState* cpu, uint32_t addr) {
      * bits to the SPU hardware registers and runs per-voice envelope updates).
      *
      * 0x8005CC54 is in the game binary but was not recognised as a function
-     * entry by the recompiler, so it is absent from tomba_dispatch.c.
+     * entry by the recompiler, so it is absent from SLPS_013.75_dispatch.c.
      * It is called every frame from the overlay VBlank handler (ra=0x800E75B8).
      * We bypass the A-table indirection and call FUN_8006E660 directly. */
     if (addr == 0x8005CC54u) {
@@ -3156,7 +3105,10 @@ void call_by_address(CPUState* cpu, uint32_t addr) {
         if (norm >= 0x80098000u && norm <= 0x801FFFFFu) {
             static uint32_t s_interp_enter = 0;
             ++s_interp_enter;
-            /* [INTERP] enter — first 50 + every 500: printf("[INTERP] enter 0x%08X ra=0x%08X\n", norm, cpu->ra); */
+            if (s_interp_enter <= 50 || s_interp_enter % 500 == 0) {
+                printf("[INTERP-CALL] enter 0x%08X ra=0x%08X sp=0x%08X\n", norm, cpu->ra, cpu->sp);
+                fflush(stdout);
+            }
 
             /* --- Camera handler trace: FUN_8002d784 --- */
             if (norm == 0x8002D784u && g_ps1_frame >= 1670) {
@@ -3294,7 +3246,7 @@ sp_check:
             fflush(stdout);
         }
     }
-    /* Tomba workaround disabled - do not clobber registers across split functions */
+    /* Workaround disabled - do not clobber registers across split functions */
     (void)sp_before; (void)s0_before; (void)s1_before;
     (void)s2_before; (void)s3_before; (void)s4_before;
     (void)s5_before; (void)s6_before; (void)s7_before;
@@ -3411,6 +3363,14 @@ void inject_pad_state(void) {
 }
 
 int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
+    static int s_bios_pad_init = 0;
+    if (!s_bios_pad_init) {
+        s_bios_pad_init = 1;
+        *(uint32_t*)(g_ram + 0x9F22C) = 0x80051498u;
+        *(uint32_t*)(g_ram + 0x9F21C) = 0x80051498u;
+        printf("[BIOS-PATCH] Populated 0x8009F22C and 0x8009F21C with 0x80051498\n");
+        fflush(stdout);
+    }
     /* [VBLANK-PUMP] Generic background VBlank pump to drive asynchronous task queues
      * (like CD-ROM / loading callbacks) if the game gets stuck in any loop that bypasses VSync.
      * We throttle the performance counter check to once every 20,000 dispatches.
@@ -3419,6 +3379,8 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
      * Instead, we update last_pump *before* calling the handler to prevent re-entrancy. */
     static uint32_t s_disp_pump_count = 0;
     if (++s_disp_pump_count % 20000 == 0) {
+        extern void debug_server_poll(void);
+        debug_server_poll();
         static LARGE_INTEGER freq = {0};
         static LARGE_INTEGER last_pump = {0};
         if (freq.QuadPart == 0) {
@@ -3439,14 +3401,39 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             extern void func_80051434(CPUState*);
             uint32_t saved_regs[35];
             memcpy(saved_regs, cpu, 35 * sizeof(uint32_t));
+            cpu->v0 = *(uint32_t*)(g_ram + 0x9F278);
             func_80051434(cpu);
             memcpy(cpu, saved_regs, 35 * sizeof(uint32_t));
+
+            extern void psx_present_frame(void);
+            psx_present_frame();
+            extern int fmv_player_tick(void);
+            fmv_player_tick();
         }
     }
 
     if (addr == 0x80022060u || addr == 0x80024808u || addr == 0x8008C8A4u) {
         printf("[OVERRIDE-SP] addr=0x%08X sp=0x%08X ra=0x%08X f%u\n", addr, cpu->sp, cpu->ra, g_ps1_frame);
         fflush(stdout);
+    }
+
+    if (addr == 0x80073BC4u) {
+        uint32_t a0 = cpu->a0;
+        uint32_t v0 = 0;
+        if (a0 >= 0x80000000 && a0 < 0x80200000) {
+            memcpy(&v0, &g_ram[(a0 + 8) & 0x1FFFFF], 4);
+        }
+        uint32_t s0 = 0, s1 = 0;
+        if (v0 >= 0x80000000 && v0 < 0x80200000) {
+            memcpy(&s0, &g_ram[(v0 + 16) & 0x1FFFFF], 4);
+            memcpy(&s1, &g_ram[(v0 + 20) & 0x1FFFFF], 4);
+        }
+        static int s_db_cnt = 0;
+        if (s_db_cnt++ < 20 || (s0 == 0x80239B94 || s0 == 0x80039B94)) {
+            printf("[DIAG-OT-WALK] func_80073BC4: a0=0x%08X v0=0x%08X s0(prim_list)=0x%08X s1(count)=%u ra=0x%08X f%u\n",
+                   a0, v0, s0, s1, cpu->ra, g_ps1_frame);
+            fflush(stdout);
+        }
     }
     /* [GTE-FIX] One-shot initialization of PsyQ sin/cos lookup table.
      * RotMatrix (func_80056514) reads from BSS table at 0x8009FC38 (physical 0x9FC38).
@@ -3486,6 +3473,42 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         }
     }
 
+    /* [GTE-FIX] One-shot initialization of global default coordinate matrix at 0x80137300.
+     * The matrix at 0x80137300 is the default identity matrix used by the SDK projection code.
+     * Since SDK init functions are bypassed or not run, it remains all zeros, collapsing all 3D
+     * coordinates to the origin. Set diagonals to 4096 (1.0 in 4.12 fixed-point) and translation to 0. */
+    {
+        static int s_matrix_init = 0;
+        if (!s_matrix_init) {
+            s_matrix_init = 1;
+            uint32_t dst = 0x137300;   /* physical offset of global identity matrix */
+            if (dst + 32 <= sizeof(g_ram)) {
+                int16_t m[3][3] = {
+                    {4096, 0, 0},
+                    {0, 4096, 0},
+                    {0, 0, 4096}
+                };
+                int32_t t[3] = {0, 0, 0};
+                memcpy(&g_ram[dst], m, sizeof(m));
+                memcpy(&g_ram[dst + 20], t, sizeof(t));
+                printf("[GTE-FIX] Initialized global identity matrix at 0x80137300\n");
+                fflush(stdout);
+            }
+        }
+    }
+
+    /* [FMV-LOOP] Intercept movie display loop to tick and bypass stalling MDEC wait loops */
+    if (addr == 0x8007FD24u) {
+        extern int fmv_player_is_active(void);
+        if (fmv_player_is_active()) {
+            extern int fmv_player_tick(void);
+            fmv_player_tick();
+            cpu->v0 = 0; // return success
+            return 1; // bypass native loop
+        }
+        return 0; // Let native DrawSync execute normally when no FMV is active
+    }
+
     /* [CDROM] Boot overrides */
     if (addr == 0x800804C0u) {
         extern int debug_server_get_input_override(void);
@@ -3493,25 +3516,33 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         extern uint16_t g_pad1_state;
         uint16_t buttons = (override != -1) ? (uint16_t)override : g_pad1_state;
         
-        if (buttons & 0x4008) { /* START (0x0008) or CROSS (0x4000) pressed */
-            uint32_t ptr = *(uint32_t*)(g_ram + 0xA5560);
-            uint32_t offset = ptr & 0x1FFFFFFF;
-            if (ptr >= 0x80000000u && offset < 2 * 1024 * 1024 - 4) {
-                /* Force the exit conditions for func_8007F754! */
-                /* 1. func_800804C0 returns 0 to allow checking exit condition */
-                cpu->v0 = 0;
-                
-                /* 2. We need *(uint32_t*)( *(uint32_t*)(0x800A5560) ) & 0x04000000 to be non-zero */
-                uint32_t val = *(uint32_t*)(g_ram + offset);
-                val |= 0x04000000;
-                *(uint32_t*)(g_ram + offset) = val;
-                
-                printf("[FMV-SKIP] Hooked 800804C0! Forcing exit conditions (v0=0, bit set)!\n");
-            } else {
-                /* Standard FMV skip: return -1 */
-                cpu->v0 = (uint32_t)-1;
-                printf("[FMV-SKIP] Hooked 800804C0! Returning -1 to skip FMV!\n");
+        uint32_t osm = 0;
+        memcpy(&osm, &g_ram[0x13DC60], 4);
+        
+        if (osm == 15) {
+            g_title_reached = 1;
+        }
+        
+        if (!g_title_reached && (buttons & 0x4008) && (osm != 15 && osm != 3 && osm != 5 && osm != 6 && osm != 10 && osm != 0)) { /* START (0x0008) or CROSS (0x4000) pressed */
+            printf("[FMV-SKIP] START or CROSS pressed! Forcing FMV skip...\n");
+            
+            /* 1. Stop FMV player and audio */
+            extern void xa_audio_seek(uint32_t lba);
+            extern void fmv_player_stop(void);
+            xa_audio_seek(0);
+            fmv_player_stop();
+            
+            /* 2. Force loop exit condition for func_800804F4 */
+            cpu->write_word(0x800A5594, 1);
+            cpu->write_word(0x800A5598, 0);
+            
+            /* 3. If in boot movie state (osm == 1), immediately transition to Title Screen */
+            if (osm == 1) {
+                uint32_t new_osm = 15;
+                memcpy(&g_ram[0x13DC60], &new_osm, 4);
+                printf("[FMV-SKIP] Boot movie, forcing osm = 15 (Title Screen)\n");
             }
+            
             fflush(stdout);
             return 1; /* Skip func_800804C0 execution */
         }
@@ -3520,12 +3551,27 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
     if (addr == 0x80067CB4u) {
         uint32_t osm = 0;
         memcpy(&osm, &g_ram[0x13DC60], 4);
+        int32_t ofx = (int32_t)cpu->a0;
+        int32_t ofy = (int32_t)cpu->a1;
+        static int32_t last_ofx = -999, last_ofy = -999;
+        if (ofx != last_ofx || ofy != last_ofy) {
+            printf("[SetGeomOffset] f%u: ofx=%d, ofy=%d, osm=%u\n", g_ps1_frame, ofx, ofy, osm);
+            fflush(stdout);
+            last_ofx = ofx;
+            last_ofy = ofy;
+        }
         if (osm == 15 || osm == 3 || osm == 7) {
             return 0; /* Let native SetGeomOffset execute during title and menu states */
         }
-        cpu->gte_ctrl[24] = 0;
-        cpu->gte_ctrl[25] = 0;
-        return 1;
+        /* Zero out only the main gameplay viewport center offsets to avoid double-offsetting
+         * on the corridor geometry. Other custom offsets (like ofx=320, ofy=240 for HUD)
+         * should run natively so HUD elements render in their correct positions. */
+        if (ofx == 160 && (ofy == 120 || ofy == 360)) {
+            cpu->gte_ctrl[24] = 0;
+            cpu->gte_ctrl[25] = 0;
+            return 1;
+        }
+        return 0; /* Run natively for other custom offsets */
     }
     if (addr == 0x80055F44u) {
         /* [VBLANK-PUMP] If the game loop is spinning bypassing VSync (gp + 436 == 0),
@@ -3556,10 +3602,16 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
                 uint32_t saved_regs[35];
                 memcpy(saved_regs, cpu, 35 * sizeof(uint32_t));
                 
+                cpu->v0 = *(uint32_t*)(g_ram + 0x9F278);
                 func_80051434(cpu);
                 
                 /* Restore original state */
                 memcpy(cpu, saved_regs, 35 * sizeof(uint32_t));
+
+                extern void psx_present_frame(void);
+                psx_present_frame();
+                extern int fmv_player_tick(void);
+                fmv_player_tick();
             }
         }
         return 0; // execute original function natively
@@ -3608,7 +3660,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
 
     static int s_disp_count = 0;
     s_disp_count++;
-    if (s_disp_count <= 20 || s_disp_count % 500 == 0) {
+    if (DIAG_ENABLED() && (s_disp_count <= 20 || s_disp_count % 500 == 0)) {
         printf("[DISPATCH] #%d PC=0x%08X ra=0x%08X\n", s_disp_count, addr, cpu->ra);
         fflush(stdout);
     }
@@ -3658,7 +3710,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
      * The FMV completion signaling doesn't propagate back to the game's
      * state machine, so without this hack the game stays at osm=1 forever.
      * TODO: Fix FMV completion to naturally advance osm 1→15. */
-    {
+    /* {
         uint32_t overlay_sm = 0;
         memcpy(&overlay_sm, &g_ram[0x13DC60], 4);
         if (overlay_sm == 1 && g_ps1_frame >= 120) {
@@ -3671,8 +3723,38 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
                 s_osm_forced = 1;
             }
         }
-    }
+    } */
 
+
+    /* [GsGetLsm-FIX] Intercept GsGetLsm (func_80069F44) to correct uninitialized/all-zero local coordinate matrices
+     * that cause 3D gameplay geometry (like corridor walls) to collapse to the center. */
+    if (addr == 0x80069F44u) {
+        uint32_t ptr = cpu->a0 & 0x1FFFFFu;
+        if (ptr + 76 <= sizeof(g_ram)) {
+            int all_zeros = 1;
+            for (int i = 0; i < 18; i++) {
+                if (g_ram[ptr + 4 + i] != 0) {
+                    all_zeros = 0;
+                    break;
+                }
+            }
+            if (all_zeros) {
+                int16_t identity[9] = {
+                    4096, 0, 0,
+                    0, 4096, 0,
+                    0, 0, 4096
+                };
+                memcpy(&g_ram[ptr + 4], identity, sizeof(identity));
+                static int s_logged_count = 0;
+                if (s_logged_count < 10) {
+                    printf("[GsGetLsm-FIX] Found all-zero rotation matrix in coordinate system at 0x%08X. Injected identity matrix. f%u\n", cpu->a0, g_ps1_frame);
+                    fflush(stdout);
+                    s_logged_count++;
+                }
+            }
+        }
+        return 0; /* Let GsGetLsm execute natively with the corrected local matrix */
+    }
 
     /* [GTE-ROTMATRIX-TRACE] Log RotMatrix input angles and sin/cos table state.
      * func_80056514 = CompMatrixLV/RotMatrix — reads angles from a0[0,2,4] as int16,
@@ -3784,6 +3866,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             call_by_address(cpu, s_vblank_cb);
         } else {
             extern void func_80051434(CPUState*);
+            cpu->v0 = *(uint32_t*)(g_ram + 0x9F278);
             func_80051434(cpu); /* Pump game VBlank as fallback */
         }
         return 0; /* Let the original polling logic execute */
@@ -3833,46 +3916,31 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
      * the async FMV decode after only ~5 frames. */
 
     if (addr == 0x80050B14u || addr == 0x80050B04u) {
-        static int vsync_cnt = 0;
-        if (vsync_cnt++ % 60 == 0) {
-            extern uint32_t g_int_chains[4];
-            /* Read the caller's RA from the stack.
-             * func_800804C0 pushes ra at sp+16, so caller's ra is at sp+24+16 = sp+40
-             * but actually func_800804C0's sp is cpu->sp + 24 (it allocates 24).
-             * The saved ra of func_800804C0's CALLER is at the address func_800804C0 saved.
-             * func_800804C0 writes ra to sp+16. But sp here is the VSync function's sp.
-             * Let's just read from several stack locations to find the caller. */
-            uint32_t caller_ra = 0;
-            uint32_t sp_phys = (cpu->sp + 24) & 0x1FFFFF; /* func_800804C0 allocated 24 bytes */
-            if (sp_phys + 20 < sizeof(g_ram))
-                memcpy(&caller_ra, &g_ram[sp_phys + 16], 4); /* func_800804C0 saved ra at sp+16 */
-            uint32_t sm = 0;
-            memcpy(&sm, &g_ram[0x008580], 4);
-            uint32_t overlay_sm = 0;
-            memcpy(&overlay_sm, &g_ram[0x13DC60], 4);
-            printf("[VSYNC] f%u ra=0x%08X caller_ra=0x%08X sp=0x%08X sm=0x%08X osm=%u\n", 
-                   g_ps1_frame, cpu->ra, caller_ra, cpu->sp, sm, overlay_sm);
-            fflush(stdout);
-        }
+        extern void debug_server_poll(void);
+        debug_server_poll();
+        /* VSync logging removed */
         
-        /* Pump the hardware interrupt chain for Priority 2 (SIO/Pad) */
+        /* Pump all hardware interrupt chains (Priorities 0 to 3) */
         extern uint32_t g_int_chains[4];
         extern uint32_t g_i_stat;
         uint32_t old_i_stat = g_i_stat;
         g_i_stat |= 1; // VBlank interrupt flag
         
-        uint32_t ptr = g_int_chains[2] & 0x1FFFFFFFu;
-        int loop_guard = 0;
-        while (ptr != 0 && ptr < 0x200000 && loop_guard++ < 10) {
-            uint32_t func = *(uint32_t*)(g_ram + ptr + 4);
-            if (func != 0) {
-                extern void call_by_address(CPUState* cpu, uint32_t addr);
-                uint32_t old_ra = cpu->ra;
-                call_by_address(cpu, func);
-                cpu->ra = old_ra;
+        extern void call_by_address(CPUState* cpu, uint32_t addr);
+        for (int chain_idx = 0; chain_idx < 4; chain_idx++) {
+            uint32_t ptr = g_int_chains[chain_idx] & 0x1FFFFFFFu;
+            int loop_guard = 0;
+            while (ptr != 0 && ptr < 0x200000 && loop_guard++ < 10) {
+                uint32_t func = *(uint32_t*)(g_ram + ptr + 4);
+                if (func != 0) {
+                    uint32_t old_ra = cpu->ra;
+                    call_by_address(cpu, func);
+                    cpu->ra = old_ra;
+                }
+                ptr = *(uint32_t*)(g_ram + ptr) & 0x1FFFFFFFu;
             }
-            ptr = *(uint32_t*)(g_ram + ptr) & 0x1FFFFFFFu;
         }
+
 
         uint32_t current = *(uint32_t*)(g_ram + 0x9F278);
 
@@ -4635,6 +4703,11 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         g_addprim_count++;
         uint32_t ot_addr = cpu->a0 & 0x1FFFFFFFu;
         uint32_t prim_addr = cpu->a1 & 0x1FFFFFFFu;
+        
+        /* Mirror RAM addresses (up to 8MB) to the 2MB bounds, matching addr_ptr behavior */
+        if (ot_addr < 0x00800000u) ot_addr &= 0x001FFFFFu;
+        if (prim_addr < 0x00800000u) prim_addr &= 0x001FFFFFu;
+
         {
             static uint32_t s_ap_diag = 0;
             /* [ADDPRIM] first 30 — re-enable printf when investigating addPrim pointer corruption */
@@ -4684,9 +4757,11 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         uint32_t s1_val = 0;
         
         uint32_t phys_a0 = a0_val & 0x1FFFFFFFu;
+        if (phys_a0 < 0x00800000u) phys_a0 &= 0x001FFFFFu;
         if (phys_a0 + 12 <= 0x200000u) {
             memcpy(&struct_ptr, &g_ram[phys_a0 + 8], 4);
             uint32_t phys_struct = struct_ptr & 0x1FFFFFFFu;
+            if (phys_struct < 0x00800000u) phys_struct &= 0x001FFFFFu;
             if (phys_struct + 24 <= 0x200000u) {
                 memcpy(&s0_val, &g_ram[phys_struct + 16], 4);
                 memcpy(&s1_val, &g_ram[phys_struct + 20], 4);
@@ -4708,6 +4783,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
                 /* If count is non-zero, perform validation of s0 memory */
                 if (s1_val > 0) {
                     uint32_t phys_s0 = s0_val & 0x1FFFFFFFu;
+                    if (phys_s0 < 0x00800000u) phys_s0 &= 0x001FFFFFu;
                     int invalid = 0;
                     const char* reason = "";
                     
@@ -5375,25 +5451,6 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             }
             uint16_t cur_bcc8; memcpy(&cur_bcc8, &g_ram[0x9BCC8], 2);
             uint8_t cur_bcca = g_ram[0x9BCCA];
-            /* Trace entity 0x800ABE78 (script slot 0 / Tomba) key fields */
-            {
-                static int s_ent0_trc = 0;
-                if (DIAG_ENABLED()) {
-                    uint8_t e0b2 = g_ram[0xABE7A];   /* entity[+2] = type */
-                    uint8_t e0b4 = g_ram[0xABE7C];   /* entity[+4] = state */
-                    uint8_t e0b1c = g_ram[0xABE94];  /* entity[+0x1c] */
-                    uint8_t e0f6a = g_ram[0xABEE2];  /* entity[+0x6A] */
-                    printf("[ENT0] f%u type=0x%02X b4=%u b1c=0x%02X f6a=%u\n",
-                           g_ps1_frame, e0b2&0x7F, e0b4, e0b1c, e0f6a);
-                    fflush(stdout);
-                    if (e0f6a == 1 && !s_ent0_trc) s_ent0_trc = 1; /* mark once f6a becomes 1 */
-                }
-            }
-            if(DIAG_ENABLED()) {
-                printf("[C9D4] #%u f%u ec30=%u fd78=%u fd7c=%u bca7=%u bcc8=%u bcca=%u ec2c=0x%08X IP=0x%04X op=0x%02X\n",
-                       s_c9d4, g_ps1_frame, ec30, fd78, fd7c, g_ram[0x9BCA7], cur_bcc8, cur_bcca, ec2c, script_ip, cur_op);
-                fflush(stdout);
-            }
             break;
         }
         /* FUN_8003B860 — VM conditional branch handler.
@@ -5492,6 +5549,52 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
             */
             break;
         }
+        case 0x8007E6E0u: { /* PutDispEnv for Paranoiascape */
+            uint32_t env_ptr = cpu->a0;
+            if (env_ptr >= 0x80000000u && env_ptr < 0x80200000u) {
+                uint8_t* ram_ptr = addr_ptr(env_ptr);
+                if (ram_ptr) {
+                    int16_t disp_x = *(int16_t*)(ram_ptr + 0);
+                    int16_t disp_y = *(int16_t*)(ram_ptr + 2);
+                    int16_t disp_w = *(int16_t*)(ram_ptr + 4);
+                    int16_t disp_h = *(int16_t*)(ram_ptr + 6);
+                    
+                    static uint32_t s_pde_cnt = 0;
+                    if (s_pde_cnt++ % 60 == 0) {
+                        printf("[PutDispEnv-H] a0=0x%08X disp=(%d,%d) %dx%d f%u\n",
+                               env_ptr, disp_x, disp_y, disp_w, disp_h, g_ps1_frame);
+                        fflush(stdout);
+                    }
+                    
+                    /* Explicitly write to GP1 using the display area start command (05h) */
+                    extern void gpu_write_gp1(uint32_t cmd);
+                    gpu_write_gp1(0x05000000u | (((uint32_t)disp_y & 0x1FF) << 10) | ((uint32_t)disp_x & 0x3FF));
+                }
+            }
+            break; /* Let compiled code run natively to handle other fields */
+        }
+        case 0x8007E514u: { /* PutDrawEnv for Paranoiascape */
+            uint32_t env_ptr = cpu->a0;
+            if (env_ptr >= 0x80000000u && env_ptr < 0x80200000u) {
+                uint8_t* ram_ptr = addr_ptr(env_ptr);
+                if (ram_ptr) {
+                    int16_t clip_x = *(int16_t*)(ram_ptr + 0);
+                    int16_t clip_y = *(int16_t*)(ram_ptr + 2);
+                    int16_t clip_w = *(int16_t*)(ram_ptr + 4);
+                    int16_t clip_h = *(int16_t*)(ram_ptr + 6);
+                    int16_t offset_x = *(int16_t*)(ram_ptr + 8);
+                    int16_t offset_y = *(int16_t*)(ram_ptr + 10);
+                    
+                    static uint32_t s_pde_cnt = 0;
+                    if (s_pde_cnt++ % 60 == 0) {
+                        printf("[PutDrawEnv-H] a0=0x%08X clip=(%d,%d) %dx%d offset=(%d,%d) f%u\n",
+                               env_ptr, clip_x, clip_y, clip_w, clip_h, offset_x, offset_y, g_ps1_frame);
+                        fflush(stdout);
+                    }
+                }
+            }
+            break; /* Let compiled code run natively */
+        }
         case 0x8005f1c8u: { /* PutDrawEnv — trace draw env buffer + first E-command */
             static uint32_t s_pde = 0;
             if (++s_pde <= 10) {
@@ -5524,9 +5627,16 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         }
         case 0x8001f158u: break; /* [TRACE] FUN_8001f158 (display state-1 → state-4) */
         case 0x800172c4u: break; /* [TRACE] FUN_800172c4 (display state-4 game callback) */
+        case 0x80050D14u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_80050D14 (ResetCallback) f%u\n", g_ps1_frame); fflush(stdout); } break; }
+        case 0x80050ea8u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_80050ea8 f%u\n", g_ps1_frame); fflush(stdout); } break; }
+        case 0x800513D4u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_800513D4 f%u\n", g_ps1_frame); fflush(stdout); } break; }
         case 0x800223a0u: { static uint32_t _c = 0; if (++_c <= 5) { printf("[TRACE] FUN_800223a0 (display state-0 setup)\n"); fflush(stdout); } break; }
         case 0x80016ddcu: { static uint32_t _c = 0; if (++_c <= 5) { printf("[TRACE] FUN_80016ddc (display state-10 init)\n"); fflush(stdout); } break; }
         case 0x80019844u: { static uint32_t _c = 0; if (++_c <= 5) { printf("[TRACE] FUN_80019844 (game logic loop entry)\n"); fflush(stdout); } break; }
+        case 0x80082CA4u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_80082CA4 (SsStart) f%u\n", g_ps1_frame); fflush(stdout); } break; }
+        case 0x80082CC4u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_80082CC4 (SsStart2) f%u\n", g_ps1_frame); fflush(stdout); } break; }
+        case 0x80082A74u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_80082A74 f%u a0=%d 0x800B6798=%02X\n", g_ps1_frame, cpu->a0, *(uint8_t*)(g_ram + 0xB6798)); fflush(stdout); } break; }
+        case 0x80082EF4u: { static uint32_t _c = 0; if (++_c <= 20) { printf("[TRACE] func_80082EF4 (Pad Callback) f%u 13DAD4=%08X\n", g_ps1_frame, *(uint32_t*)(g_ram + 0x13DAD4)); fflush(stdout); } break; }
         /* FUN_8005D4D0 handled below in call_by_address proper */
         /* func_800211AC sub-functions */
         case 0x8006BA8Cu: { static uint32_t _c = 0; if (++_c <= 5) { printf("[TRACE] func_8006BA8C sp=0x%08X\n", cpu->sp); fflush(stdout); } break; }
@@ -5681,8 +5791,8 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
                     call_by_address(cpu, 0xB0u);
                 }
                 tptr += 0x70u;
-                memcpy(&g_scratch[0x1D4], &tptr, 4);
             }
+            return 1;
         }
         
         case 0x8008D60Cu: {
@@ -5735,7 +5845,58 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         }
 
         case 0x8007F754u: {
+            if (g_ps1_frame >= 280) {
+                static int s_count_gp = 0;
+                if (++s_count_gp <= 30) {
+                    printf("[DEBUG-FMV-GP] func_8007F754 called in gameplay: frame=%u, count=%d, a0=0x%08X, a1=0x%08X, a2=0x%08X, a3=0x%08X\n",
+                           g_ps1_frame, s_count_gp, cpu->a0, cpu->a1, cpu->a2, cpu->a3);
+                    
+                    printf("[DEBUG-FMV-GP] cpu->a0 (0x%08X) contents:\n", cpu->a0);
+                    uint32_t a0_phys = cpu->a0 & 0x1FFFFF;
+                    for (int i = 0; i < 32; i++) {
+                        uint32_t val = 0;
+                        if (a0_phys + i * 4 + 4 <= sizeof(g_ram)) {
+                            memcpy(&val, &g_ram[a0_phys + i * 4], 4);
+                            printf("  a0+%2d: 0x%08X (%d)\n", i * 4, val, val);
+                        }
+                    }
+
+                    printf("[DEBUG-FMV-GP] cpu->a1 (0x%08X) contents:\n", cpu->a1);
+                    uint32_t a1_phys = cpu->a1 & 0x1FFFFF;
+                    for (int i = 0; i < 16; i++) {
+                        uint32_t val = 0;
+                        if (a1_phys + i * 4 + 4 <= sizeof(g_ram)) {
+                            memcpy(&val, &g_ram[a1_phys + i * 4], 4);
+                            printf("  a1+%2d: 0x%08X (%d)\n", i * 4, val, val);
+                        }
+                    }
+
+                    uint32_t active_movie_struct = cpu->read_word(0x800A5450);
+                    printf("[DEBUG-FMV-GP] Active Movie Struct ptr from 0x800A5450: 0x%08X\n", active_movie_struct);
+                    if (active_movie_struct >= 0x80000000 && active_movie_struct < 0x80200000) {
+                        uint32_t ram_offset = active_movie_struct & 0x1FFFFF;
+                        printf("[DEBUG-FMV-GP] Active Movie Struct contents:\n");
+                        for (int i = 0; i < 16; i++) {
+                            uint32_t val = 0;
+                            if (ram_offset + i * 4 + 4 <= sizeof(g_ram)) {
+                                memcpy(&val, &g_ram[ram_offset + i * 4], 4);
+                                printf("  +%2d: 0x%08X (%d)\n", i * 4, val, val);
+                            }
+                        }
+                    }
+                    fflush(stdout);
+                }
+            }
             return 0; /* Let native code execute */
+        }
+        case 0x80017F44u: {
+            static int s_count_f44 = 0;
+            if (++s_count_f44 <= 20) {
+                printf("[DEBUG-STAGE-F44] func_80017F44 called at frame %u: a0=0x%08X, gp=0x%08X, v0=0x%08X\n",
+                       g_ps1_frame, cpu->a0, cpu->gp, cpu->v0);
+                fflush(stdout);
+            }
+            break;
         }
         case 0x80016940u: {
             static uint32_t s_ff = 0; ++s_ff;
@@ -5747,24 +5908,39 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
          * (caller loops back), -1 = terminate (caller exits FMV).
          * The caller's loop never checks for button input, relying on VBlank
          * callbacks which are not populated in the recompiled environment.
-         * When START is pressed, fully override and return -1. */
+         * When START or CROSS is pressed, fully override and return -1. */
         case 0x800804F4u: {
             static uint32_t s_f4_calls = 0;
             if (++s_f4_calls <= 3 || (s_f4_calls % 1000) == 0) {
                 printf("[FMV-LOOP] func_800804F4 call #%u\n", s_f4_calls);
                 fflush(stdout);
             }
-            uint16_t al = (uint16_t)(g_ram[0x9eb5a] | ((uint16_t)g_ram[0x9eb5b] << 8));
-            uint16_t buttons = ~al;
-            if (buttons & 0x0008) { /* START pressed */
-                static int s_skip = 0;
-                if (++s_skip <= 5) {
-                    printf("[FMV-SKIP] START pressed at f%u → forcing func_800804F4 return -1\n",
-                           g_ps1_frame);
-                    fflush(stdout);
+            
+            uint32_t osm = 0;
+            memcpy(&osm, &g_ram[0x13DC60], 4);
+            if (osm == 15) {
+                g_title_reached = 1;
+            }
+            
+            if (!g_title_reached) {
+                extern int debug_server_get_input_override(void);
+                int override = debug_server_get_input_override();
+                extern uint16_t g_pad1_state;
+                uint16_t buttons = (override != -1) ? (uint16_t)override : g_pad1_state;
+                
+                uint16_t al = (uint16_t)(g_ram[0x9eb5a] | ((uint16_t)g_ram[0x9eb5b] << 8));
+                uint16_t ram_buttons = ~al;
+                
+                if (((buttons & 0x4008) || (ram_buttons & 0x4008)) && (osm != 5 && osm != 6 && osm != 10 && osm != 0)) { /* START (0x0008) or CROSS (0x4000) pressed */
+                    static int s_skip = 0;
+                    if (++s_skip <= 5) {
+                        printf("[FMV-SKIP] Input pressed at f%u → forcing func_800804F4 return -1 (buttons=0x%04X, ram_buttons=0x%04X)\n",
+                               g_ps1_frame, buttons, ram_buttons);
+                        fflush(stdout);
+                    }
+                    cpu->v0 = (uint32_t)-1;
+                    return 1;
                 }
-                cpu->v0 = (uint32_t)-1;
-                return 1;
             }
             break;
         }
@@ -5801,7 +5977,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
         /* ================================================================
          * BIOS WRAPPER INTERCEPTS
          * ================================================================
-         * Tomba's binary contains BIOS wrapper functions that load the
+         * The game binary contains BIOS wrapper functions that load the
          * function number into t1, the vector (0xA0/0xB0/0xC0) into t2,
          * then do 'jr t2'. In recompiled code, 'jr t2' becomes a TODO
          * no-op. We intercept each wrapper here to make the actual BIOS
@@ -6033,7 +6209,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
                 uint32_t lba = (m * 60u + s) * 75u + f;
                 if (lba >= 150u) lba -= 150u;
                 g_cdrom_lba = lba;
-                /* [CdlSeekL] printf("[CdlSeekL] MSF=%02X:%02X:%02X → LBA %u\n", bm, bs, bf, lba); */
+                printf("[CdlSeekL] MSF=%02X:%02X:%02X -> LBA %u\n", bm, bs, bf, lba); fflush(stdout);
                 extern void xa_audio_seek(uint32_t lba);
                 xa_audio_seek(lba);
                 /* Note: fmv_player is seeked lazily on first FUN_8001EFE8 call,
@@ -6164,7 +6340,7 @@ int psx_override_dispatch(CPUState* cpu, uint32_t addr) {
              * pixel data from a SEPARATE DMA2 block-mode transfer, NOT from the next
              * OT entries. Without this, subsequent OT drawing commands get consumed
              * as fake pixel data, corrupting the entire frame. */
-            gpu_abort_streaming();  /* Abort CPUToVRAM streaming after each element */
+            // gpu_abort_streaming();  /* Abort CPUToVRAM streaming after each element */
             if (next24 == 0xFFFFFFu) break;  /* terminator */
             if (next24 == 0u) {               /* null link = end of list */
                 null_stop_addr = ptr;

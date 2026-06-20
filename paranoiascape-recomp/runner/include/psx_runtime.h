@@ -45,6 +45,9 @@ void psx_mmio_trace_enable(int enable);
 /* Install signal handlers for SIGSEGV/SIGABRT to dump CPU state on crash. */
 void psx_install_crash_handler(void);
 
+/* Recovers from fatal crash states by writing crash diagnostic info and waiting in a loop. */
+void psx_fatal_halt(const char* format, ...);
+
 /* Dynamic call dispatch — handles BIOS calls and jump-register targets.
  * Logs any address not yet implemented. Never crashes on unknown calls. */
 void call_by_address(CPUState* cpu, uint32_t addr);

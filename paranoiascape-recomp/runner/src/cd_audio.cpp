@@ -5,7 +5,6 @@
  */
 #include "cd_audio.h"
 #include <windows.h>
-#include <mmsystem.h>
 #include <cstdio>
 #include <cstring>
 #include <atomic>
@@ -20,15 +19,17 @@ static constexpr int BYTES_PER_BUF   = SAMPLES_PER_BUF * CHANNELS * sizeof(int16
 
 static std::string g_base_dir;
 
-static HWAVEOUT           g_wave = NULL;
-static WAVEHDR            g_hdrs[NUM_BUFS];
-static int16_t            g_pcm[NUM_BUFS][SAMPLES_PER_BUF * CHANNELS];
-static HANDLE             g_done_event = NULL;
-
 static std::thread        g_thread;
 static std::atomic<bool>  g_running{false};
 static std::atomic<int>   g_next_track{-1};
 static std::atomic<bool>  g_stop_requested{false};
+static float              g_volume = 0.5f; /* 0.0-1.0, default 50% */
+
+/* ---- Circular Buffer ---- */
+static constexpr int RING_BUF_SAMPLES = SAMPLES_PER_BUF * 8; // 32768 stereo samples
+static int16_t g_ring_buf[RING_BUF_SAMPLES * CHANNELS];
+static std::atomic<size_t> g_ring_write{0};
+static std::atomic<size_t> g_ring_read{0};
 
 struct RiffHeader {
     char riff[4];
@@ -41,6 +42,41 @@ struct ChunkHeader {
     uint32_t size;
 };
 
+static size_t get_free() {
+    size_t w = g_ring_write.load(std::memory_order_relaxed);
+    size_t r = g_ring_read.load(std::memory_order_relaxed);
+    if (w >= r) return RING_BUF_SAMPLES - 1 - (w - r);
+    return r - w - 1;
+}
+
+static size_t ring_write(const int16_t* data, size_t pairs) {
+    size_t w = g_ring_write.load(std::memory_order_relaxed);
+    size_t r = g_ring_read.load(std::memory_order_relaxed);
+    size_t free_slots = (w >= r) ? (RING_BUF_SAMPLES - 1 - (w - r)) : (r - w - 1);
+    size_t to_write = (pairs < free_slots) ? pairs : free_slots;
+    for (size_t i = 0; i < to_write; i++) {
+        g_ring_buf[w * 2]     = data[i * 2];
+        g_ring_buf[w * 2 + 1] = data[i * 2 + 1];
+        w = (w + 1) % RING_BUF_SAMPLES;
+    }
+    g_ring_write.store(w, std::memory_order_release);
+    return to_write;
+}
+
+extern "C" size_t cd_audio_read_pcm(int16_t* out, size_t pairs) {
+    size_t w = g_ring_write.load(std::memory_order_acquire);
+    size_t r = g_ring_read.load(std::memory_order_relaxed);
+    size_t avail = (w >= r) ? (w - r) : (RING_BUF_SAMPLES - (r - w));
+    size_t to_read = (pairs < avail) ? pairs : avail;
+    for (size_t i = 0; i < to_read; i++) {
+        out[i * 2]     = g_ring_buf[r * 2];
+        out[i * 2 + 1] = g_ring_buf[r * 2 + 1];
+        r = (r + 1) % RING_BUF_SAMPLES;
+    }
+    g_ring_read.store(r, std::memory_order_release);
+    return to_read;
+}
+
 static void audio_thread_func() {
     FILE* current_wav = nullptr;
     int current_track = -1;
@@ -48,6 +84,8 @@ static void audio_thread_func() {
     while (g_running) {
         int target_track = g_next_track.exchange(-1);
         if (target_track != -1) {
+            g_ring_write.store(0, std::memory_order_relaxed);
+            g_ring_read.store(0, std::memory_order_relaxed);
             if (current_wav) {
                 fclose(current_wav);
                 current_wav = nullptr;
@@ -77,6 +115,8 @@ static void audio_thread_func() {
         }
 
         if (g_stop_requested) {
+            g_ring_write.store(0, std::memory_order_relaxed);
+            g_ring_read.store(0, std::memory_order_relaxed);
             if (current_wav) {
                 fclose(current_wav);
                 current_wav = nullptr;
@@ -85,34 +125,32 @@ static void audio_thread_func() {
         }
 
         if (current_wav) {
-            // Find a free buffer
-            int free_buf = -1;
-            for (int i = 0; i < NUM_BUFS; i++) {
-                if (g_hdrs[i].dwFlags & WHDR_DONE) {
-                    free_buf = i;
-                    break;
-                }
-            }
-
-            if (free_buf != -1) {
-                size_t read_bytes = fread(g_pcm[free_buf], 1, BYTES_PER_BUF, current_wav);
+            size_t free_slots = get_free();
+            if (free_slots >= 1024) {
+                int16_t temp_buf[1024 * 2];
+                size_t read_bytes = fread(temp_buf, 1, 1024 * sizeof(int16_t) * 2, current_wav);
                 if (read_bytes == 0) {
-                    // Loop or stop? PS1 CD-DA usually loops if requested, but for now we stop.
                     fclose(current_wav);
                     current_wav = nullptr;
                 } else {
-                    if (read_bytes < BYTES_PER_BUF) {
-                        memset((uint8_t*)g_pcm[free_buf] + read_bytes, 0, BYTES_PER_BUF - read_bytes);
+                    size_t read_pairs = read_bytes / (sizeof(int16_t) * 2);
+                    if (read_pairs < 1024) {
+                        memset(temp_buf + read_pairs * 2, 0, (1024 - read_pairs) * sizeof(int16_t) * 2);
                     }
-                    g_hdrs[free_buf].dwBufferLength = BYTES_PER_BUF;
-                    waveOutWrite(g_wave, &g_hdrs[free_buf], sizeof(WAVEHDR));
+                    
+                    // Scale volume
+                    float vol = g_volume;
+                    for (size_t i = 0; i < 1024; i++) {
+                        temp_buf[i * 2]     = (int16_t)(temp_buf[i * 2] * vol);
+                        temp_buf[i * 2 + 1] = (int16_t)(temp_buf[i * 2 + 1] * vol);
+                    }
+                    
+                    ring_write(temp_buf, 1024);
                 }
             } else {
-                // Wait for a buffer to finish
-                WaitForSingleObject(g_done_event, 100);
+                Sleep(5);
             }
         } else {
-            // Idle
             Sleep(10);
         }
     }
@@ -138,31 +176,13 @@ void cd_audio_init(const char* cue_path) {
     
     // We expect the WAV files to be in <g_base_dir>/extractedwav/
 
-    g_done_event = CreateEventA(NULL, FALSE, FALSE, NULL);
-
-    WAVEFORMATEX wfx = {0};
-    wfx.wFormatTag = WAVE_FORMAT_PCM;
-    wfx.nChannels = CHANNELS;
-    wfx.nSamplesPerSec = SAMPLE_RATE;
-    wfx.wBitsPerSample = 16;
-    wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
-    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
-
-    if (waveOutOpen(&g_wave, WAVE_MAPPER, &wfx, (DWORD_PTR)g_done_event, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) {
-        fprintf(stderr, "[CD-DA] Failed to open waveOut device\n");
-        return;
-    }
-
-    for (int i = 0; i < NUM_BUFS; i++) {
-        g_hdrs[i].lpData = (LPSTR)g_pcm[i];
-        g_hdrs[i].dwBufferLength = BYTES_PER_BUF;
-        g_hdrs[i].dwFlags = 0;
-        waveOutPrepareHeader(g_wave, &g_hdrs[i], sizeof(WAVEHDR));
-        g_hdrs[i].dwFlags |= WHDR_DONE; /* Mark initially free */
-    }
+    g_ring_write.store(0, std::memory_order_relaxed);
+    g_ring_read.store(0, std::memory_order_relaxed);
 
     g_running = true;
     g_thread = std::thread(audio_thread_func);
+    printf("[CD-DA] Audio ready (WAV streaming → ring buffer)\n");
+    fflush(stdout);
 }
 
 void cd_audio_play_track(int track) {
@@ -173,24 +193,17 @@ void cd_audio_stop(void) {
     g_stop_requested = true;
 }
 
+void cd_audio_set_volume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_volume = v;
+}
+
 void cd_audio_shutdown(void) {
     if (!g_running) return;
     g_running = false;
     if (g_thread.joinable()) {
         g_thread.join();
-    }
-
-    if (g_wave) {
-        waveOutReset(g_wave);
-        for (int i = 0; i < NUM_BUFS; i++) {
-            waveOutUnprepareHeader(g_wave, &g_hdrs[i], sizeof(WAVEHDR));
-        }
-        waveOutClose(g_wave);
-        g_wave = NULL;
-    }
-    if (g_done_event) {
-        CloseHandle(g_done_event);
-        g_done_event = NULL;
     }
 }
 

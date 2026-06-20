@@ -41,7 +41,6 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <mmsystem.h>
 
 #include "spu.h"
 
@@ -49,7 +48,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <atomic>
-#include <thread>
+#include <vector>
+
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+
+extern "C" size_t xa_audio_read_pcm(int16_t* out, size_t pairs);
+extern "C" size_t cd_audio_read_pcm(int16_t* out, size_t pairs);
 
 /* -------------------------------------------------------------------------
  * Constants
@@ -111,14 +116,10 @@ static VoiceState g_voices[SPU_NUM_VOICES];
 static CRITICAL_SECTION g_cs;
 
 /* -------------------------------------------------------------------------
- * WinMM audio output
+ * miniaudio device
  * ---------------------------------------------------------------------- */
-static HWAVEOUT g_waveout  = NULL;
-static WAVEHDR  g_hdrs[SPU_NUM_BUFS];
-static int16_t  g_pcm [SPU_NUM_BUFS][SPU_BUF_SAMPLES * 2];  /* stereo */
-
+static ma_device g_audio_device;
 static std::atomic<bool> g_running{false};
-static std::thread       g_thread;
 
 /* -------------------------------------------------------------------------
  * ADPCM block decode
@@ -315,15 +316,28 @@ static void spu_mix(int16_t* out, int num_pairs)
             /* Apply ADSR volume: env_vol is 0..0x7FFF */
             s = (s * v->env_vol) >> 15;
 
-            /* Apply voice volume (15-bit fixed, bit15 = sweep mode — ignored) */
-            int16_t vl = (int16_t)(g_spu_regs[vi * 8 + 0] & 0x7FFFu);
-            int16_t vr = (int16_t)(g_spu_regs[vi * 8 + 1] & 0x7FFFu);
+            /* Apply voice volume (15-bit signed, bit15 = sweep mode — ignored) */
+            int16_t raw_vl = g_spu_regs[vi * 8 + 0];
+            int16_t raw_vr = g_spu_regs[vi * 8 + 1];
+            int16_t vl = ((int16_t)(raw_vl << 1)) >> 1;
+            int16_t vr = ((int16_t)(raw_vr << 1)) >> 1;
 
             mix_l += (s * (int32_t)vl) >> 14;
             mix_r += (s * (int32_t)vr) >> 14;
+
+
         }
 
-        /* Apply master volume */
+        /* Apply SPU Main Volume registers (0x1F801D80 / 0x1F801D82) */
+        int16_t raw_mvol_l = g_spu_regs[0xC0];
+        int16_t raw_mvol_r = g_spu_regs[0xC1];
+        int16_t main_vol_l = ((int16_t)(raw_mvol_l << 1)) >> 1;
+        int16_t main_vol_r = ((int16_t)(raw_mvol_r << 1)) >> 1;
+
+        mix_l = (mix_l * main_vol_l) >> 14;
+        mix_r = (mix_r * main_vol_r) >> 14;
+
+        /* Apply master volume override */
         mix_l = (int32_t)(mix_l * g_spu_master_vol);
         mix_r = (int32_t)(mix_r * g_spu_master_vol);
 
@@ -341,72 +355,64 @@ static void spu_mix(int16_t* out, int num_pairs)
 }
 
 /* -------------------------------------------------------------------------
- * Audio output thread
- * Keeps WinMM's buffer queue filled.  Rotation: fill oldest done buffer,
- * re-submit; natural WinMM timing provides accurate 44100 Hz clock.
+ * miniaudio Callback & Mixing
  * ---------------------------------------------------------------------- */
-static void audio_thread_func()
+static void audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount)
 {
-    WAVEFORMATEX wfx  = {};
-    wfx.wFormatTag      = WAVE_FORMAT_PCM;
-    wfx.nChannels       = 2;
-    wfx.nSamplesPerSec  = SPU_SAMPLE_RATE;
-    wfx.wBitsPerSample  = 16;
-    wfx.nBlockAlign     = 4;
-    wfx.nAvgBytesPerSec = SPU_SAMPLE_RATE * 4;
+    int16_t* out = (int16_t*)pOutput;
+    
+    // 1. Synthesize SPU voices into the output buffer
+    spu_mix(out, (int)frameCount);
+    
+    // 2. Mix XA audio
+    static int16_t s_mix_temp[16384 * 2];
+    ma_uint32 to_mix = frameCount;
+    if (to_mix > 16384) to_mix = 16384;
 
-    if (waveOutOpen(&g_waveout, WAVE_MAPPER, &wfx,
-                    0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        fprintf(stderr, "[SPU] waveOutOpen failed\n");
-        fflush(stderr);
-        return;
-    }
-
-    memset(g_hdrs, 0, sizeof(g_hdrs));
-    memset(g_pcm,  0, sizeof(g_pcm));
-
-    /* Pre-fill and submit all buffers */
-    for (int i = 0; i < SPU_NUM_BUFS; i++) {
-        spu_mix(g_pcm[i], SPU_BUF_SAMPLES);
-        WAVEHDR* h       = &g_hdrs[i];
-        h->lpData        = reinterpret_cast<LPSTR>(g_pcm[i]);
-        h->dwBufferLength = SPU_BUF_SAMPLES * 4;
-        h->dwFlags        = 0;
-        waveOutPrepareHeader(g_waveout, h, sizeof(WAVEHDR));
-        waveOutWrite(g_waveout, h, sizeof(WAVEHDR));
-    }
-
-    int cur = 0;
-    while (g_running.load(std::memory_order_relaxed)) {
-        WAVEHDR* h = &g_hdrs[cur];
-
-        /* Wait for this buffer to be consumed */
-        while (!(h->dwFlags & WHDR_DONE) &&
-               g_running.load(std::memory_order_relaxed)) {
-            Sleep(1);
+    size_t xa_read = xa_audio_read_pcm(s_mix_temp, to_mix);
+    if (xa_read > 0) {
+        int16_t cd_vol_l = (int16_t)g_spu_regs[0xD8];
+        int16_t cd_vol_r = (int16_t)g_spu_regs[0xD9];
+        if (cd_vol_l == 0 && cd_vol_r == 0) {
+            cd_vol_l = 0x7FFF;
+            cd_vol_r = 0x7FFF;
         }
-        if (!g_running.load(std::memory_order_relaxed)) break;
-
-        /* Refill and resubmit */
-        waveOutUnprepareHeader(g_waveout, h, sizeof(WAVEHDR));
-        spu_mix(g_pcm[cur], SPU_BUF_SAMPLES);
-        h->lpData         = reinterpret_cast<LPSTR>(g_pcm[cur]);
-        h->dwBufferLength = SPU_BUF_SAMPLES * 4;
-        h->dwFlags        = 0;
-        waveOutPrepareHeader(g_waveout, h, sizeof(WAVEHDR));
-        waveOutWrite(g_waveout, h, sizeof(WAVEHDR));
-
-        cur = (cur + 1) % SPU_NUM_BUFS;
+        for (size_t i = 0; i < xa_read; i++) {
+            int32_t xa_l = (s_mix_temp[i * 2]     * (int32_t)cd_vol_l) >> 15;
+            int32_t xa_r = (s_mix_temp[i * 2 + 1] * (int32_t)cd_vol_r) >> 15;
+            int32_t mix_l = (int32_t)out[i * 2]     + xa_l;
+            int32_t mix_r = (int32_t)out[i * 2 + 1] + xa_r;
+            if (mix_l >  32767) mix_l =  32767;
+            if (mix_l < -32768) mix_l = -32768;
+            if (mix_r >  32767) mix_r =  32767;
+            if (mix_r < -32768) mix_r = -32768;
+            out[i * 2]     = (int16_t)mix_l;
+            out[i * 2 + 1] = (int16_t)mix_r;
+        }
     }
-
-    /* Drain and close */
-    waveOutReset(g_waveout);
-    for (int i = 0; i < SPU_NUM_BUFS; i++) {
-        if (g_hdrs[i].dwFlags & WHDR_PREPARED)
-            waveOutUnprepareHeader(g_waveout, &g_hdrs[i], sizeof(WAVEHDR));
+    
+    // 3. Mix CD audio
+    size_t cd_read = cd_audio_read_pcm(s_mix_temp, to_mix);
+    if (cd_read > 0) {
+        int16_t cd_vol_l = (int16_t)g_spu_regs[0xD8];
+        int16_t cd_vol_r = (int16_t)g_spu_regs[0xD9];
+        if (cd_vol_l == 0 && cd_vol_r == 0) {
+            cd_vol_l = 0x7FFF;
+            cd_vol_r = 0x7FFF;
+        }
+        for (size_t i = 0; i < cd_read; i++) {
+            int32_t cd_l = (s_mix_temp[i * 2]     * (int32_t)cd_vol_l) >> 15;
+            int32_t cd_r = (s_mix_temp[i * 2 + 1] * (int32_t)cd_vol_r) >> 15;
+            int32_t mix_l = (int32_t)out[i * 2]     + cd_l;
+            int32_t mix_r = (int32_t)out[i * 2 + 1] + cd_r;
+            if (mix_l >  32767) mix_l =  32767;
+            if (mix_l < -32768) mix_l = -32768;
+            if (mix_r >  32767) mix_r =  32767;
+            if (mix_r < -32768) mix_r = -32768;
+            out[i * 2]     = (int16_t)mix_l;
+            out[i * 2 + 1] = (int16_t)mix_r;
+        }
     }
-    waveOutClose(g_waveout);
-    g_waveout = NULL;
 }
 
 /* =========================================================================
@@ -427,17 +433,38 @@ void spu_init(void)
 
     InitializeCriticalSection(&g_cs);
 
-    g_running.store(true, std::memory_order_relaxed);
-    g_thread = std::thread(audio_thread_func);
+    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+    deviceConfig.playback.format   = ma_format_s16;
+    deviceConfig.playback.channels = 2;
+    deviceConfig.sampleRate        = 44100;
+    deviceConfig.dataCallback      = audio_callback;
+    deviceConfig.pUserData         = NULL;
 
-    printf("[SPU] Initialised — 24 voices, 44100 Hz stereo\n");
+    if (ma_device_init(NULL, &deviceConfig, &g_audio_device) != MA_SUCCESS) {
+        fprintf(stderr, "[SPU] Failed to initialize miniaudio device\n");
+        fflush(stderr);
+        return;
+    }
+
+    if (ma_device_start(&g_audio_device) != MA_SUCCESS) {
+        fprintf(stderr, "[SPU] Failed to start miniaudio device\n");
+        fflush(stderr);
+        ma_device_uninit(&g_audio_device);
+        return;
+    }
+
+    g_running.store(true, std::memory_order_relaxed);
+
+    printf("[SPU] Initialised (miniaudio) — 24 voices, 44100 Hz stereo\n");
     fflush(stdout);
 }
 
 void spu_shutdown(void)
 {
+    if (!g_running.load()) return;
     g_running.store(false, std::memory_order_relaxed);
-    if (g_thread.joinable()) g_thread.join();
+    ma_device_stop(&g_audio_device);
+    ma_device_uninit(&g_audio_device);
     DeleteCriticalSection(&g_cs);
 }
 
@@ -454,6 +481,7 @@ void spu_set_master_volume(float v)
  * ---------------------------------------------------------------------- */
 static void key_on(uint16_t mask, int base_bit)
 {
+    extern uint32_t g_ps1_frame;
     for (int i = 0; i < 16; i++) {
         int vi = base_bit + i;
         if (vi >= SPU_NUM_VOICES) break;
@@ -466,7 +494,6 @@ static void key_on(uint16_t mask, int base_bit)
                            |  (uint32_t)g_spu_regs[vi * 8 + 4];
 
         static uint32_t s_kon = 0;
-        /* [SPU KON] first 30 — re-enable printf when investigating voice keying */
         ++s_kon;
 
         v->cur_addr    = (uint32_t)start_reg * 8u;
@@ -508,6 +535,8 @@ void spu_write_half(uint32_t addr, uint16_t val)
 
     /* Always store to register mirror so reads return the written value */
     g_spu_regs[idx] = val;
+
+
 
     EnterCriticalSection(&g_cs);
 
@@ -586,6 +615,7 @@ uint16_t spu_read_half(uint32_t addr)
 void spu_dma_write(uint32_t src_ram_addr, uint32_t byte_count,
                    const uint8_t* ram_base, uint32_t ram_size)
 {
+    extern uint32_t g_ps1_frame;
     src_ram_addr &= 0x1FFFFFu;          /* strip KSEG bits, clamp to 2MB */
     if (src_ram_addr >= ram_size) return;
     if (src_ram_addr + byte_count > ram_size)
@@ -601,5 +631,5 @@ void spu_dma_write(uint32_t src_ram_addr, uint32_t byte_count,
     g_transfer_addr += byte_count;
     LeaveCriticalSection(&g_cs);
 
-    /* [SPU DMA] printf("[SPU DMA] %u bytes: RAM 0x%06X → SPU RAM 0x%05X\n", byte_count, ...); */
+
 }

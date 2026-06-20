@@ -1,3 +1,16 @@
+---
+title: "Paranoiascape Irq Chain And Cd Spin"
+category: concept
+sources: []
+compiled-from: conversation
+created: 2026-05-07
+updated: 2026-06-19
+tags: [psx, recomp, interrupt, cdrom]
+confidence: high
+summary: "Analysis of the IRQ chain dispatcher and the CD-sync spin boot block stall mitigation strategy."
+volatility: warm
+---
+
 # IRQ Chain Dispatch & the CD-Sync Boot Block
 
 Status as of 2026-05-07. The recompiled binary boots through entry init but stalls in a CD-ROM polling spin before reaching the title screen.
@@ -6,7 +19,7 @@ Status as of 2026-05-07. The recompiled binary boots through entry init but stal
 
 `run_recomp.bat` produces ~48,000 `[FRAME]` events in 8s with only **51** `[CALL]` events. Boot reaches:
 
-- Entry point `0x80012E2C` runs (forced entry — see [boot-sequence.md](./paranoiascape-boot-sequence.md))
+- Entry point `0x80012E2C` runs (forced entry — see [[paranoiascape-boot-sequence|boot-sequence.md]] ([boot-sequence.md](../topics/paranoiascape-boot-sequence.md)))
 - BSS clear, runtime setup, CdInit calls (overridden — return success)
 - `ResetGraph`, GP1 display mode `0x000001` (320×240, **not** 24-bit)
 - `SysEnqIntRP` registers one chain[2] handler — queue `0x8013E4D0`, handler `func_8008D0A0`, verifier at `0x8008D038`

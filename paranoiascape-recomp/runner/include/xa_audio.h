@@ -19,6 +19,9 @@ void xa_audio_set_volume(float v);
 /* Clean up resources. Call at exit. */
 void xa_audio_shutdown(void);
 
+/* Consume decoded stereo samples from the circular buffer. Returns number of sample pairs read. */
+size_t xa_audio_read_pcm(int16_t* out, size_t pairs);
+
 #ifdef __cplusplus
 }
 #endif

@@ -21,6 +21,7 @@ extern "C" void psx_present_frame(void);
 extern "C" void xa_audio_seek(uint32_t lba);
 extern "C" void fmv_force_display_area(int x, int y, int w, int h);
 extern "C" void renderer_upload_fmv_frame(int w, int h, const uint16_t* data);
+extern "C" void renderer_clear_display_snapshot(void);
 
 /* --- sector constants ------------------------------------------------------ */
 static constexpr int RAW_SECTOR   = 2352;
@@ -440,6 +441,7 @@ static void simple_idct_put(uint8_t* dest, int linesize, int16_t* block) {
  * ============================================================================ */
 static FILE*    g_fmv_bin  = nullptr;
 static uint32_t g_fmv_lba  = 0;
+static uint32_t g_fmv_start_lba = 0;
 static bool     g_fmv_active = false;
 static int      g_fmv_width  = 0, g_fmv_height = 0;
 static int      g_chunk_total        = 0;
@@ -619,7 +621,9 @@ void fmv_player_init(const char* bin_path) {
 void fmv_player_seek(uint32_t lba, const char* filename) {
     (void)filename; /* filename is only used for logging in the AVI-based player */
     g_fmv_lba              = lba;
+    g_fmv_start_lba        = lba;
     g_fmv_active           = true;
+    renderer_clear_display_snapshot();
     g_demux_bytes          = 0;
     g_chunk_total          = 0;
     g_chunks_collected     = 0;
@@ -643,7 +647,14 @@ void fmv_player_seek(uint32_t lba, const char* filename) {
 }
 
 int fmv_player_is_active(void) { return g_fmv_active ? 1 : 0; }
+uint32_t fmv_player_get_start_lba(void) { return g_fmv_start_lba; }
 int fmv_player_is_displaying(void) { return g_fmv_active ? 1 : 0; }
+
+int fmv_player_wants_overlay(void) {
+    if (!g_fmv_active) return 1;
+    if (g_fmv_start_lba == 15275) return 1;
+    return 0;
+}
 
 /* Deferred VRAM upload: on a real PS1 the MDEC DMA fires during VBlank,
  * AFTER all CPU-initiated GPU commands for that frame.  In our recomp the
@@ -661,6 +672,7 @@ void fmv_refresh_vram(void) {
 void fmv_player_stop(void) {
     g_fmv_active = false;
     g_fmv_pending = false;
+    renderer_clear_display_snapshot();
 }
 
 /* ---- 15-bit RGB555 → 8-bit indexed conversion for CLUT pipeline ----
@@ -764,6 +776,7 @@ int fmv_player_tick(void) {
             printf("[FMV] EOF at LBA %u after %d frames\n", g_fmv_lba, g_frame_count);
             fflush(stdout);
             g_fmv_active = false;
+            renderer_clear_display_snapshot();
             xa_audio_seek(0);
             return 1;
         }
@@ -778,6 +791,7 @@ int fmv_player_tick(void) {
             printf("[FMV] EOD sector after %d frames\n", g_frame_count);
             fflush(stdout);
             g_fmv_active = false;
+            renderer_clear_display_snapshot();
             xa_audio_seek(0);
             return 1;
         }
@@ -787,6 +801,7 @@ int fmv_player_tick(void) {
                 printf("[FMV] No video for 100 sectors — FMV done (%d frames)\n", g_frame_count);
                 fflush(stdout);
                 g_fmv_active = false;
+                renderer_clear_display_snapshot();
                 xa_audio_seek(0);
                 return 1;
             }
@@ -826,7 +841,7 @@ int fmv_player_tick(void) {
 
             if (g_fmv_is_24bit) {
                 fmv_vram_upload24(0, 0, g_fmv_width, g_fmv_height, g_rgb24);
-                fmv_force_display_area(0, 0, g_fmv_width, g_fmv_height);
+                // fmv_force_display_area(0, 0, g_fmv_width, g_fmv_height);
             } else {
                 /* Upload to (0,0) for direct framebuffer display during FMV */
                 fmv_vram_upload(0, 0, g_fmv_width, g_fmv_height, g_rgb555);
@@ -839,8 +854,9 @@ int fmv_player_tick(void) {
                 upload_indexed_frame();
 
                 /* Force display to match FMV resolution so it fills the screen.
-                 * The PS1 display scaler stretches 320×240 to full CRT. */
-                fmv_force_display_area(0, 0, g_fmv_width, g_fmv_height);
+                 * The PS1 display scaler stretches 320×240 to full CRT.
+                 * Commented out to prevent conflict with 640x480 mode on Title Screen. */
+                // fmv_force_display_area(0, 0, g_fmv_width, g_fmv_height);
             }
 
             /* Present + throttle to 15fps (authentic PS1 STR framerate).
@@ -878,6 +894,7 @@ int fmv_player_tick(void) {
 void fmv_player_shutdown(void) {
     if (g_fmv_bin) { fclose(g_fmv_bin); g_fmv_bin = nullptr; }
     g_fmv_active = false;
+    renderer_clear_display_snapshot();
 }
 
 } /* extern "C" */

@@ -111,15 +111,15 @@ static void depth_cue_from_ir(GTEState* gte) {
 // ---------------------------------------------------------------------------
 void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0) {
     // Step 1: Matrix multiplication + translation
-    int64_t mac1 = ((int64_t)gte->TR[0] << 12) +
+    int64_t mac1 = (int64_t)gte->TR[0] +
                    (int64_t)gte->RT[0][0] * V[0] +
                    (int64_t)gte->RT[0][1] * V[1] +
                    (int64_t)gte->RT[0][2] * V[2];
-    int64_t mac2 = ((int64_t)gte->TR[1] << 12) +
+    int64_t mac2 = (int64_t)gte->TR[1] +
                    (int64_t)gte->RT[1][0] * V[0] +
                    (int64_t)gte->RT[1][1] * V[1] +
                    (int64_t)gte->RT[1][2] * V[2];
-    int64_t mac3 = ((int64_t)gte->TR[2] << 12) +
+    int64_t mac3 = (int64_t)gte->TR[2] +
                    (int64_t)gte->RT[2][0] * V[0] +
                    (int64_t)gte->RT[2][1] * V[1] +
                    (int64_t)gte->RT[2][2] * V[2];

@@ -416,7 +416,7 @@ void GPUInterpreter::HandleGP0Miscellaneous(uint32_t cmd) {
             uint16_t h = (wh >> 16) & 0xFFFF;
 
             if (renderer) {
-                printf("[FillRect] f%d xy=(%d,%d) wh=(%d,%d) color=0x%06X\n", g_ps1_frame, x, y, w, h, color);
+                // printf("[FillRect] f%d xy=(%d,%d) wh=(%d,%d) color=0x%06X\n", g_ps1_frame, x, y, w, h, color);
                 renderer->FillRectangle(x, y, w, h, color);
             }
             break;
@@ -787,7 +787,7 @@ void GPUInterpreter::HandleGP0VRAMToVRAM(const uint32_t* params) {
     uint16_t height = (wh >> 16) & 0x1FF;
 
     // Call renderer to perform the copy
-    printf("[CopyRect] src=(%d,%d) dst=(%d,%d) wh=(%d,%d)\n", src_x, src_y, dst_x, dst_y, width, height);
+    // printf("[CopyRect] src=(%d,%d) dst=(%d,%d) wh=(%d,%d)\n", src_x, src_y, dst_x, dst_y, width, height);
     if (renderer) {
         renderer->CopyVRAM(src_x, src_y, dst_x, dst_y, width, height);
     }
@@ -1129,8 +1129,8 @@ void GPUInterpreter::HandleGP1DisplayMode(uint32_t param) {
     int width = h_res_table[state.display_control.h_resolution];
     int height = state.display_control.v_resolution ? 480 : 240;
 
-    printf("[GP1:08h] f%u DisplayMode: w=%d h=%d 24b=%d interl=%d\n", 
-           g_ps1_frame, width, height, state.display_control.color_depth_24bit, state.display_control.interlace);
+    // printf("[GP1:08h] f%u DisplayMode: w=%d h=%d 24b=%d interl=%d\n", 
+    //        g_ps1_frame, width, height, state.display_control.color_depth_24bit, state.display_control.interlace);
 
     if (renderer) {
         renderer->SetDisplayMode(width, height,
