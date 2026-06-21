@@ -51,7 +51,7 @@ static uint32_t s_snap_save_frame = 0;
 static const char* s_snap_save_path = NULL;
 static const char* s_snap_load_path = NULL;
 
-static PS1::OpenGLRenderer* g_renderer = NULL;
+PS1::OpenGLRenderer* g_renderer = NULL;
 static PS1::GPUInterpreter* g_gpu = NULL;
 
 extern "C" void renderer_set_fmv_renderer(void* r);

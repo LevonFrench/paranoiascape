@@ -28,3 +28,5 @@
 ## [2026-06-19] cleanup | Consolidated SIO joypad state machine, optimized VRAM clearing, removed legacy Tomba references, and cleaned hot-path printfs across the runner code
 ## [2026-06-19] graphics | Added fine-grained auto-screenshot milestones up to frame 5000 and verified active gameplay corridor 3D rendering; updated gitignore and pushed all code changes to origin/main
 ## [2026-06-20] graphics | Added +0.5 rounding offset to normalized texture coordinate conversions in fragment shaders to fix vertical stripe texture artifacts on 3D geometry; verified gameplay continuity up to frame 14224 and confirmed the apparent frame 6060 freeze is due to plunger lane waiting loop
+## [2026-06-21] graphics | Implemented custom screenshot TCP debug command and verified gameplay rendering across Stage 2, Stage 3, and Stage 4; committed changes and verified wiki log hygiene
+

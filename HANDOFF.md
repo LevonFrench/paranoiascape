@@ -1,33 +1,30 @@
-# Paranoiascape Session Handoff — GTE Translation Scaling & Gameplay Verification
+# Paranoiascape Session Handoff — Multi-Stage Verification & Custom Debug Tooling
 
 ## Summary of Accomplishments
 
-- **Fixed 3D Geometry Projection**:
-  - Resolved the GTE translation scaling discrepancy where double-shifted translation vector components (`TR[0..2] << 12`) in `gte_rtps_internal` (`gte.cpp`) collapsed the coordinate system. Corrected translation additions to align properly with rotation scaling.
-- **Active Gameplay Corridor Verification**:
-  - Configured fine-grained auto-screenshot milestones in `main_runner.cpp` (frames 3400 to 4900).
-  - Extended flipper playback automation (`scratch/test_play_flipper.py`) to run up to frame 5000+.
-  - Successfully verified that both the stage selection 3D tables and the active gameplay 3D corridors, paddles, and plunger render correctly under the GTE fixes.
-- **Performance Optimization**:
-  - Commented out hot-path debug console prints in `gpu_interpreter.cpp` (`FillRect`, `CopyRect`, `DisplayMode`) and `runtime.c` (`DMA2-LL`) to restore smooth 60 FPS gameplay.
-- **Repository Synchronization**:
-  - Added untracked external tool directory `llm-wiki/` to `.gitignore`.
-  - Updated wiki log telemetry (`wiki/log.md`) and validated layout structures via the local wiki linter.
-  - Staged, committed, and pushed all updates successfully to `LevonFrench/paranoiascape` on `main`.
+- **Custom Screenshot Debug Command**:
+  - Exposed `g_renderer` globally from `main_runner.cpp` (removed `static` linkage).
+  - Modified `runner/src/extras.cpp` to trap a custom `"screenshot"` JSON-RPC command in `game_handle_debug_cmd()`. It flushes pending primitives via `g_renderer->FlushPrimitives()` and saves the display output via `g_renderer->SaveScreenshotBMP(path)`.
+  - Rebuilt the runner successfully using `ninja -C paranoiascape-recomp/runner/build`.
+
+- **Multi-Stage Gameplay Corridor Verification**:
+  - Implemented `scratch/test_other_stages.py` to automate boot, title screens, stage select menu navigation, tutorial bypassing, ball launching, and flipper playing.
+  - Successfully tested **Stage 2, Stage 3, and Stage 4** gameplay, making sure each corridor loads, plays, and renders.
+  - Captured on-demand screenshots (`sshots/stage2_*.png`, `sshots/stage3_*.png`, `sshots/stage4_*.png`) showing high-detail rendered geometry, verifying that the coordinate scaling fixes and shader interpolation changes are globally correct.
+  - Safely reaped runner processes using active subprocess termination on exit.
 
 ## Verification Artifacts
 
-- **Screenshots Carousel**:
-  - [auto_f3300.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/180cfeeb-0d99-4e29-8605-5ce8b41bb11a/auto_f3300.png) - 3D layout selection screen.
-  - [auto_f4500.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/180cfeeb-0d99-4e29-8605-5ce8b41bb11a/auto_f4500.png) - Gameplay pinball corridor entry.
-  - [auto_f4700.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/180cfeeb-0d99-4e29-8605-5ce8b41bb11a/auto_f4700.png) - Flipper mashing action in 3D.
-  - [auto_f5000.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/180cfeeb-0d99-4e29-8605-5ce8b41bb11a/auto_f5000.png) - Pinball corridor progression.
-- **Walkthrough**: [walkthrough.md](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/180cfeeb-0d99-4e29-8605-5ce8b41bb11a/walkthrough.md) details code modifications and visual outputs.
-- **Task List**: [task.md](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/180cfeeb-0d99-4e29-8605-5ce8b41bb11a/task.md) tracks complete implementation phases.
+- **Screenshots**:
+  - [stage2_f1133.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/0feca3f9-d268-406a-afbe-749e654f03bc/stage2_f1133.png) - Stage 2 gameplay.
+  - [stage3_f1243.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/0feca3f9-d268-406a-afbe-749e654f03bc/stage3_f1243.png) - Stage 3 gameplay.
+  - [stage4_f1479.png](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/0feca3f9-d268-406a-afbe-749e654f03bc/stage4_f1479.png) - Stage 4 gameplay.
+- **Walkthrough**: [walkthrough.md](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/0feca3f9-d268-406a-afbe-749e654f03bc/walkthrough.md) details code modifications, logs, and screenshots.
+- **Task List**: [task.md](file:///C:/Users/hotgh/.gemini/antigravity-ide/brain/0feca3f9-d268-406a-afbe-749e654f03bc/task.md) tracks all complete verification phases.
 
 ## Next Steps
 
 1. **Review Environment Light Registers**:
-   - Trace normal transformation and light matrix calculations (`BK`, `FC`, `LC`) in `gte.cpp` during level transitions to verify ambient environmental lighting scales correctly.
-2. **Review Code Audit Report items**:
-   - Inspect other minor code quality/perf suggestions from `code_audit_report.md` (e.g. SPU MIX prints inside the critical section lock, SIO pad handler consolidation) when requested.
+   - Trace normal transformation and light matrix calculations in `gte.cpp` during level transitions to verify ambient environmental lighting scales correctly.
+2. **Consolidate SPU/Audio Sync**:
+   - Trace SPU callbacks and audio capture logs to ensure audio mixing functions cleanly without crackle or thread-safety stalls.
